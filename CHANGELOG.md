@@ -22,6 +22,22 @@ the fact on the commits that shipped them.
   `vX.Y.Z` publishes the release notes from this file and adds the version
   tags to the Docker images of that commit.
 
+### Changed
+
+- Cache evictions are logged as one line per run, `Cache: evicted N entries
+  (size) to make room` or `… for the disk headroom`, instead of one line per
+  entry; the per-entry lines are at debug level.
+
+### Fixed
+
+- A large upload into a cache full of small entries no longer freezes the
+  server. Making room for it rewrote the cache index after every evicted
+  entry on the event loop; with about 10,000 cached files that held every
+  request for several minutes, so WebDAV clients timed out ("Connection timed
+  out after 20 seconds of inactivity"), directory listings failed and the
+  Telegram and Discord connections dropped. Evictions now run in one pass and
+  write the index once; the background sweep and bulk removals do the same.
+
 ## [0.6.1] - 2026-10-04
 
 ### Changed

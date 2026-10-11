@@ -198,6 +198,57 @@ class TestBudget:
         assert cache.entry("old") is None
         assert cache.entry("mid") is not None and cache.entry("new") is not None
 
+    async def test_making_room_writes_the_index_once(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """A large upload into a cache full of small entries evicts many of
+        them; the index used to be rewritten after every single one, which
+        held the event loop for minutes and timed the clients out."""
+        cache = make_cache(tmp_path, min_free_mb=1)
+        for i in range(200):
+            await stage(cache, f"small-{i}", b"s" * 10)
+            entry_of(cache, f"small-{i}").last_access = i
+        saves = []
+        save_index = cache._save_index
+
+        def counting_save():
+            saves.append(1)
+            save_index()
+
+        monkeypatch.setattr(cache, "_save_index", counting_save)
+        # Each eviction frees its 10 bytes; 150 of them make the headroom.
+        free = 1024 * 1024 + 100
+
+        def freeing():
+            return free + 10 * (200 - len(cache._entries))
+
+        monkeypatch.setattr(cache, "_disk_free", freeing)
+
+        with caplog.at_level("INFO", logger="tgdcfs.core.local_cache"):
+            writer = cache.open_staging("fs", "big", 1600)
+
+        assert writer is not None
+        assert cache.entry("small-149") is None
+        assert cache.entry("small-150") is not None
+        # One write for the evictions, one for the new entry.
+        assert len(saves) == 2
+        assert "Cache: evicted 150 entries (1.5 KiB) for the disk headroom" in (
+            caplog.text
+        )
+        assert "evicting" not in caplog.text
+
+    async def test_removing_many_entries_survives_a_restart(self, tmp_path):
+        cache = make_cache(tmp_path, max_files=3)
+        for i in range(3):
+            await stage(cache, f"v{i}", b"v" * 10)
+            entry_of(cache, f"v{i}").last_access = i
+
+        cache.remove_many(["v0", "v1"])
+        await stage(cache, "w", b"w" * 10)
+
+        reloaded = make_cache(tmp_path, max_files=3)
+        assert sorted(reloaded._entries) == ["v2", "w"]
+
     async def test_pinned_entries_are_never_evicted(self, tmp_path):
         cache = make_cache(tmp_path, max_size_mb=1, block_kb=256)
         await stage(cache, "pinned", b"a" * (768 * 1024))

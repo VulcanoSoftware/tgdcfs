@@ -614,18 +614,29 @@ class LocalCache:
         except OSError:
             return None
 
-    def _lru_victim(self, keep: Optional[CacheEntry] = None) -> Optional[CacheEntry]:
-        """The evictable entry read longest ago, if any."""
-        victims = [e for e in self._entries.values() if e.evictable and e is not keep]
-        if not victims:
-            return None
-        return min(victims, key=lambda e: e.last_access)
+    def _lru_order(self, keep: Optional[CacheEntry] = None) -> List[CacheEntry]:
+        """The evictable entries, the one read longest ago *last*, so an
+        eviction run pops its victims off the end.
 
-    def _evict(self, victim: CacheEntry, why: str) -> None:
-        logger.info(
-            f"Cache: evicting {victim.version_id} ({victim.charged_bytes()} bytes) {why}"
-        )
-        self.remove(victim.version_id)
+        Sorted once per run: picking each victim by scanning every entry
+        made a run over a cache of thousands of small entries quadratic.
+        """
+        victims = [e for e in self._entries.values() if e.evictable and e is not keep]
+        victims.sort(key=lambda e: e.last_access, reverse=True)
+        return victims
+
+    def _evict(self, victim: CacheEntry, why: str) -> int:
+        """Drop ``victim`` without writing the index; returns the bytes it
+        was charged. The caller saves the index once its run is over."""
+        charged = victim.charged_bytes()
+        logger.debug(f"Cache: evicting {victim.version_id} ({charged} bytes) {why}")
+        self._drop(victim.version_id)
+        return charged
+
+    @staticmethod
+    def _log_evictions(count: int, freed: int, why: str) -> None:
+        if count:
+            logger.info(f"Cache: evicted {count} entries ({format_bytes(freed)}) {why}")
 
     def _fits(self, size: int) -> bool:
         cfg = self.config
@@ -649,26 +660,45 @@ class LocalCache:
         something else.
         """
         cfg = self.config
-        while True:
-            over_bytes = bool(
-                cfg.max_size_bytes and self.used_bytes() + size > cfg.max_size_bytes
-            )
-            over_files = bool(
-                new_entry and cfg.max_files and len(self._entries) + 1 > cfg.max_files
-            )
-            over_disk = False
-            free: Optional[int] = None
-            if cfg.min_free_bytes:
-                free = self._disk_free()
-                over_disk = free is not None and free - size < cfg.min_free_bytes
-            if not over_bytes and not over_files and not over_disk:
-                return None
-            victim = self._lru_victim(keep)
-            if victim is None:
-                return self._shortfall(size, over_bytes, over_files, free, keep)
-            self._evict(
-                victim, "for the disk headroom" if over_disk else "to make room"
-            )
+        # Everything here runs on the event loop: one pass over a sorted
+        # snapshot, the used bytes kept as a running total and the index
+        # written once at the end, so making room for one large upload in
+        # a cache of thousands of small entries does not stall every
+        # other request.
+        used = self.used_bytes()
+        victims: Optional[List[CacheEntry]] = None
+        evicted = {"to make room": [0, 0], "for the disk headroom": [0, 0]}
+        try:
+            while True:
+                over_bytes = bool(
+                    cfg.max_size_bytes and used + size > cfg.max_size_bytes
+                )
+                over_files = bool(
+                    new_entry
+                    and cfg.max_files
+                    and len(self._entries) + 1 > cfg.max_files
+                )
+                over_disk = False
+                free: Optional[int] = None
+                if cfg.min_free_bytes:
+                    free = self._disk_free()
+                    over_disk = free is not None and free - size < cfg.min_free_bytes
+                if not over_bytes and not over_files and not over_disk:
+                    return None
+                if victims is None:
+                    victims = self._lru_order(keep)
+                if not victims:
+                    return self._shortfall(size, over_bytes, over_files, free, keep)
+                why = "for the disk headroom" if over_disk else "to make room"
+                freed = self._evict(victims.pop(), why)
+                used -= freed
+                evicted[why][0] += 1
+                evicted[why][1] += freed
+        finally:
+            if any(count for count, _ in evicted.values()):
+                self._save_index()
+                for why, (count, freed) in evicted.items():
+                    self._log_evictions(count, freed, why)
 
     def _shortfall(
         self,
@@ -948,14 +978,22 @@ class LocalCache:
             self._save_index()
 
     def remove(self, version_id: str) -> None:
-        if self._entries.pop(version_id, None) is None:
-            return
-        self._unlink(version_id)
-        self._save_index()
+        if self._drop(version_id):
+            self._save_index()
 
     def remove_many(self, version_ids: Iterable[str]) -> None:
-        for version_id in list(version_ids):
-            self.remove(version_id)
+        """Remove several entries and write the index once."""
+        dropped = [self._drop(version_id) for version_id in list(version_ids)]
+        if any(dropped):
+            self._save_index()
+
+    def _drop(self, version_id: str) -> bool:
+        """Forget an entry and delete its files, leaving the index to the
+        caller; ``False`` when there was no such entry."""
+        if self._entries.pop(version_id, None) is None:
+            return False
+        self._unlink(version_id)
+        return True
 
     def _unlink(self, version_id: str) -> None:
         for path in (self.data_path(version_id), self.map_path(version_id)):
@@ -1013,22 +1051,22 @@ class LocalCache:
                     self._evict(entry, f"unread for {cfg.max_age_hours} h")
                     report["expired"] += 1
 
+        # One sorted snapshot for both passes, the used bytes as a running
+        # total and the index written once below, as in ``_make_room``.
+        victims = self._lru_order()
         target = cfg.target_bytes
-        while target is not None and self.used_bytes() > target:
-            victim = self._lru_victim()
-            if victim is None:
-                break
-            self._evict(victim, f"down to {cfg.target_fill_percent}% of the budget")
+        used = self.used_bytes()
+        while target is not None and used > target and victims:
+            used -= self._evict(
+                victims.pop(), f"down to {cfg.target_fill_percent}% of the budget"
+            )
             report["evicted"] += 1
 
-        while cfg.min_free_bytes:
+        while cfg.min_free_bytes and victims:
             free = self._disk_free()
             if free is None or free >= cfg.min_free_bytes:
                 break
-            victim = self._lru_victim()
-            if victim is None:
-                break
-            self._evict(victim, "for the disk headroom")
+            self._evict(victims.pop(), "for the disk headroom")
             report["evicted"] += 1
 
         self.last_sweep = now
