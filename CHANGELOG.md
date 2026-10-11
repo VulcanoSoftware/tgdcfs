@@ -37,6 +37,9 @@ the fact on the commits that shipped them.
   out after 20 seconds of inactivity"), directory listings failed and the
   Telegram and Discord connections dropped. Evictions now run in one pass and
   write the index once; the background sweep and bulk removals do the same.
+- The `xyvran/tgdcfs-fe` image is published again. Its static build ran
+  under arm64 emulation and hit the six-hour job limit; it now runs once on
+  the build host, and only the nginx stage is built per platform.
 
 ## [0.6.1] - 2026-10-04
 
