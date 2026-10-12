@@ -139,6 +139,12 @@ class GithubDirectory(TGFSDirectory):
             return f"{encrypt_path_name(key, name)}.{message_id}"
         return f"{name}.{message_id}"
 
+    def _message_name(self, name: str) -> str:
+        """``name`` as it may appear in a commit message: encrypted when
+        keyed, like the path it belongs to."""
+        key = self._ghc.name_key
+        return encrypt_path_name(key, name) if key is not None else name
+
     @property
     def _github_path(self) -> str:
         """Get the GitHub repository path for this directory"""
@@ -169,7 +175,9 @@ class GithubDirectory(TGFSDirectory):
         try:
             self._ghc.repo.create_file(
                 path=dir_path,
-                message=f"Create directory {name}",
+                # The on-repo segment, never the plaintext name: commit
+                # messages are as public as the paths.
+                message=f"Create directory {child_segment}",
                 content="",
                 branch=self._ghc.commit,
             )
@@ -282,7 +290,7 @@ class GithubDirectory(TGFSDirectory):
         try:
             self._ghc.repo.create_file(
                 path=file_path,
-                message=f"Create file reference for {name}",
+                message=f"Create file reference for {self._message_name(name)}",
                 content="",
                 branch=self._ghc.commit,
             )
@@ -314,9 +322,12 @@ class GithubDirectory(TGFSDirectory):
                 )
                 if isinstance(file_content, list):
                     file_content = file_content[0]
+                # The name as this segment stores it: encrypted, or the
+                # legacy plaintext the path already shows.
+                stored_name = segment.rsplit(".", 1)[0]
                 self._ghc.repo.delete_file(
                     path=file_path,
-                    message=f"Delete file reference for {fr.name}",
+                    message=f"Delete file reference for {stored_name}",
                     sha=file_content.sha,
                     branch=self._ghc.commit,
                 )

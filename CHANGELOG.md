@@ -41,6 +41,15 @@ the fact on the commits that shipped them.
   under arm64 emulation and hit the six-hour job limit; it now runs once on
   the build host, and only the nginx stage is built per platform.
 
+### Security
+
+- With `encrypt_names: true` and `github_repo` metadata, the commit messages
+  in the metadata repository no longer contain plaintext file and directory
+  names ("Create file reference for movie.mp4"); they name the encrypted
+  segment that the path already shows. Commits made by earlier versions keep
+  their plaintext messages until the repository history is rewritten or the
+  repository is replaced.
+
 ## [0.6.1] - 2026-10-04
 
 ### Changed

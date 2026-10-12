@@ -710,6 +710,33 @@ class TestGithubDirectory:
         assert is_encrypted_path_name(enc_name)
         assert decrypt_path_name(key, enc_name) == "movie.mp4"
 
+    def test_commit_messages_carry_no_plaintext_names_when_keyed(self, mock_ghc):
+        """Commit messages are as public as the paths: with a name key they
+        name the encrypted segment, never the plaintext."""
+        from tgdcfs.crypto.path_names import derive_path_name_key, encrypt_path_name
+
+        key = derive_path_name_key(b"\x42" * 32)
+        mock_ghc.name_key = key
+        mock_ghc.repo.create_file.return_value = Mock()
+        mock_content = Mock()
+        mock_content.sha = "abc123"
+        mock_ghc.repo.get_contents.return_value = mock_content
+
+        root = GithubDirectory(mock_ghc, "root", None, stored_encrypted=True)
+        root.create_dir("Filme")
+        file_ref = root.create_file_ref("movie.mp4", 39)
+        root.delete_file_ref(file_ref)
+
+        messages = [
+            c.kwargs["message"] for c in mock_ghc.repo.create_file.call_args_list
+        ] + [mock_ghc.repo.delete_file.call_args.kwargs["message"]]
+        assert messages == [
+            f"Create directory {encrypt_path_name(key, 'Filme')}",
+            f"Create file reference for {encrypt_path_name(key, 'movie.mp4')}",
+            f"Delete file reference for {encrypt_path_name(key, 'movie.mp4')}",
+        ]
+        assert not any("Filme" in m or "movie" in m for m in messages)
+
     def test_create_dir_with_github_ops_failure(self, mock_ghc):
         """Test creating directory with GitHub operation failure"""
         mock_ghc.repo.create_file.side_effect = Exception("GitHub API error")

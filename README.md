@@ -579,7 +579,12 @@ the metadata repository never see plaintext.
   replaced with an AES-GCM ciphertext token. The plaintext names stay
   inside the (already encrypted) metadata, so WebDAV and the manager UI
   are unaffected. Only new uploads are obfuscated; pre-existing files keep
-  their original document name in Telegram.
+  their original document name in Telegram. With ``github_repo`` metadata
+  the directory and file names in the repository paths are encrypted the
+  same way, and so are the names in its commit messages. Commits made by
+  earlier versions named the plaintext file and directory; that history
+  stays readable in the repository until it is rewritten or the repository
+  is replaced.
 
 Set up:
 
