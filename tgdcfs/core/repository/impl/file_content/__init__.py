@@ -103,6 +103,9 @@ class StoreFileContentRepository(IFileContentRepository):
     async def save(self, file_msg: UploadableFileMessage) -> List[SentFileMessage]:
         # Stage the bytes on disk while they stream to the primary, so the
         # mirrors read the version from here instead of from the primary.
+        # Not with ``sync: tee``: the mirrors that re-upload take the bytes
+        # from the stream and the others are copied server-side, so nothing
+        # would read the staged copy and the upload goes to the stores only.
         writer = None
         version_id = file_msg.version_id
         if (
@@ -110,6 +113,7 @@ class StoreFileContentRepository(IFileContentRepository):
             and self._cache.config.stage_uploads
             and version_id
             and self._mirror_group is not None
+            and not self._tee_mirroring
         ):
             writer = self._cache.open_staging(
                 self._cache_scope, version_id, file_msg.get_size()

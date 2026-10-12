@@ -37,6 +37,11 @@ the fact on the commits that shipped them.
   out after 20 seconds of inactivity"), directory listings failed and the
   Telegram and Discord connections dropped. Evictions now run in one pass and
   write the index once; the background sweep and bulk removals do the same.
+- With `sync: tee` an upload is no longer written to the local cache as
+  well, as the README already promised: the mirrors take the bytes from the
+  upload stream, so the staged copy was never read and only cost disk space
+  and evictions. `stage_uploads` now only applies to `sync: inline` and
+  `sync: background`.
 - The `xyvran/tgdcfs-fe` image is published again. Its static build ran
   under arm64 emulation and hit the six-hour job limit; it now runs once on
   the build host, and only the nginx stage is built per platform.

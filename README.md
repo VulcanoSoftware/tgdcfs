@@ -408,7 +408,7 @@ tgdcfs:
     max_files: 0             # cached versions, 0 = unlimited
     max_file_size_mb: 4096   # larger versions are not staged whole; reads still cache per block
     block_kb: 4096           # unit the read cache fills and serves, min 64
-    stage_uploads: true      # write incoming uploads to the cache for the mirrors
+    stage_uploads: true      # write incoming uploads to the cache for the mirrors (not with sync: tee)
     keep_for_reads: true     # keep entries after replication and fill them from downloads
     min_free_mb: 1024        # headroom left on the disk for everything else, 0 = off
     max_age_hours: 0         # drop entries unread for this long, 0 = never

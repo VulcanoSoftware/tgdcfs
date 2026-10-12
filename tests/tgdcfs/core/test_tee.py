@@ -9,7 +9,9 @@ from typing import List, cast
 import pytest
 
 from tgdcfs.backends.base import IStore
+from tgdcfs.config import CacheConfig
 from tgdcfs.core.api import DirectoryApi, FileApi, FileDescApi, MetaDataApi
+from tgdcfs.core.local_cache import LocalCache
 from tgdcfs.core.mirror import MirrorGroup, MirrorStore
 from tgdcfs.core.model import TGFSDirectory, TGFSFileVersion
 from tgdcfs.core.replication import ReplicationQueue, file_path
@@ -286,6 +288,7 @@ class Stack:
         *mirrors: FakeStore,
         queue: ReplicationQueue | None = None,
         inline: bool = False,
+        cache: LocalCache | None = None,
     ):
         self.name = "fs"
         self.primary = primary
@@ -296,6 +299,8 @@ class Stack:
             inline_mirroring=inline,
             tee_mirroring=True,
             tee_buffer=256,
+            cache=cache,
+            cache_scope="fs",
         )
         self.fd_repo = StoreFDRepository(primary, mirror_group=self.mirror_group)
         self.metadata_api = MetaDataApi(
@@ -355,6 +360,39 @@ class TestWritePath:
         # The primary was never asked for the content parts.
         assert not any(mid in version.message_ids for mid in tg.downloaded)
         assert await stack.read("a.bin") == DATA
+
+    async def test_nothing_is_staged_in_the_cache(self, tmp_path):
+        """The mirrors take the bytes from the stream, so an upload goes to
+        the stores only, even with ``stage_uploads`` on."""
+        cache = LocalCache(
+            CacheConfig.from_dict(
+                {
+                    "enabled": True,
+                    "max_size_mb": 0,
+                    "max_files": 0,
+                    "max_file_size_mb": 0,
+                    "block_kb": 64,
+                    "stage_uploads": True,
+                    "keep_for_reads": True,
+                }
+            ),
+            directory=str(tmp_path / "cache"),
+        )
+        cache.load()
+        staged: List[str] = []
+        open_staging = cache.open_staging
+
+        def recording_open_staging(fs, version_id, size):
+            staged.append(version_id)
+            return open_staging(fs, version_id, size)
+
+        cache.open_staging = recording_open_staging  # type: ignore[method-assign]
+        stack = await Stack(telegram_like(), discord_like(), cache=cache).init()
+        await stack.put("a.bin", DATA)
+
+        assert staged == []
+        assert cache.stats()["entries"] == 0
+        assert (await stack.version("a.bin")).has_copy_in("dc:9")
 
     async def test_a_forwarding_mirror_is_still_copied_inline(self):
         tg, spare, dc = telegram_like(), telegram_spare(), discord_like()
