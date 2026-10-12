@@ -37,6 +37,14 @@ the fact on the commits that shipped them.
   out after 20 seconds of inactivity"), directory listings failed and the
   Telegram and Discord connections dropped. Evictions now run in one pass and
   write the index once; the background sweep and bulk removals do the same.
+- Large files mirrored to Discord can be written with a Telegram primary.
+  The file descriptor lists every Discord part (10 MB each), so a 10 GB file
+  needs over a thousand ids and no longer fit Telegram's 4096-character
+  message: the upload finished in both stores, then failed with
+  `MessageTooLongError`, the client got a 500 and the file stayed at 0 bytes.
+  Such descriptors now go into a small `overflow.json` document that the
+  descriptor message points at; the message keeps its id. Older versions
+  cannot read these descriptors.
 - With `sync: tee` an upload is no longer written to the local cache as
   well, as the README already promised: the mirrors take the bytes from the
   upload stream, so the staged copy was never read and only cost disk space

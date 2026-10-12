@@ -8,7 +8,16 @@ uploads -- everything Telegram-specific about moving bytes lives here.
 
 import asyncio
 import logging
-from typing import AsyncIterator, Generator, Iterable, Iterator, List, Optional, Set
+from typing import (
+    AsyncIterator,
+    Dict,
+    Generator,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Set,
+)
 
 from pyrate_limiter import Duration, InMemoryBucket, Limiter, Rate
 from telethon.errors import MessageNotModifiedError, RPCError
@@ -45,6 +54,7 @@ from tgdcfs.utils.chunk_cache import (
     block_range,
     chunk_cache,
 )
+from tgdcfs.utils.message_cache import MessageCache
 from tgdcfs.utils.others import exclude_none
 from tgdcfs.utils.prefetching_chain import prefetching_chain
 
@@ -68,6 +78,14 @@ PART_SIZE_PREMIUM = 512 * 1024 * 8000  # 4 GB, premium accounts only
 
 # Longest text message Telegram accepts.
 MAX_TEXT_CHARS = 4096
+
+# A longer text (a file descriptor listing a large replica: a 10 GB file
+# mirrored to Discord carries over a thousand 10 MB part ids) is uploaded
+# as a document, and the text message holds this marker plus the
+# document's message id. The text message keeps its id, which the
+# metadata refers to; reads resolve the marker transparently.
+OVERFLOW_PREFIX = "TGDCFS_OVERFLOW:"
+OVERFLOW_FILENAME = "overflow.json"
 
 # A failed send is retried forever, this far apart: the bytes are
 # already on Telegram's servers, only the message is missing.
@@ -110,6 +128,13 @@ class TelegramStore(MessageBroker, IStore):
         )
         self._premium_upload = premium_upload and tdlib.account is not None
         self.__readahead: Set[tuple[int, int, int]] = set()
+        # Text message id -> the overflow document it points to, as last
+        # written or read here; lets an edit or a delete drop the document
+        # it supersedes without reading the message first.
+        self._overflow_of: Dict[int, int] = {}
+        # Overflow document id -> its text. Documents are never edited, so
+        # an entry cannot go stale.
+        self._overflow_text: MessageCache[int, str] = MessageCache()
 
     @property
     def backend(self) -> str:
@@ -130,14 +155,36 @@ class TelegramStore(MessageBroker, IStore):
         limiter.try_acquire(name)
 
     async def send_text(self, message: str) -> int:
+        overflow = None
+        if len(message) > MAX_TEXT_CHARS:
+            overflow = await self._send_overflow(message)
+            message = f"{OVERFLOW_PREFIX}{overflow}"
         self.__try_acquire("TelegramStore.send_text")
-        return (
+        message_id = (
             await self.tdlib.next_bot.send_text(
                 SendTextReq(chat=self.private_file_channel, text=message)
             )
         ).message_id
+        if overflow is not None:
+            self._overflow_of[message_id] = overflow
+        return message_id
 
     async def edit_message_text(self, message_id: int, message: str) -> int:
+        superseded = self._overflow_of.get(message_id)
+        overflow = None
+        if len(message) > MAX_TEXT_CHARS:
+            overflow = await self._send_overflow(message)
+            message = f"{OVERFLOW_PREFIX}{overflow}"
+        res = await self._edit_text(message_id, message)
+        if overflow is not None:
+            self._overflow_of[message_id] = overflow
+        else:
+            self._overflow_of.pop(message_id, None)
+        if superseded is not None and superseded != overflow:
+            await self.delete_messages([superseded], force=True)
+        return res
+
+    async def _edit_text(self, message_id: int, message: str) -> int:
         self.__try_acquire("TelegramStore.edit_message_text")
         try:
             return (
@@ -157,6 +204,61 @@ class TelegramStore(MessageBroker, IStore):
             if e.message == "Message is not modified":
                 return message_id
             raise e
+
+    async def _send_overflow(self, message: str) -> int:
+        """Upload a text too long for a message as a document; its id."""
+        sent = await self.upload(
+            FileMessageFromBuffer.new(
+                buffer=message.encode("utf-8"), name=OVERFLOW_FILENAME
+            )
+        )
+        doc_id = sent[0].message_id
+        self._overflow_text[doc_id] = message
+        return doc_id
+
+    async def _overflow_text_of(self, doc_id: int) -> Optional[str]:
+        if (text := self._overflow_text.get(doc_id)) is not None:
+            return text
+        try:
+            resp = await self.download_file(doc_id, 0, -1)
+            data = bytearray()
+            async for chunk in resp.chunks:
+                data.extend(chunk)
+        except Exception as ex:
+            logger.warning(f"Could not read overflow document {doc_id}: {ex}")
+            return None
+        text = data.decode("utf-8")
+        self._overflow_text[doc_id] = text
+        return text
+
+    async def _resolve_overflow(self, message: MessageResp) -> Optional[MessageResp]:
+        """The message with the text its overflow marker stands for.
+
+        ``None`` when the document is gone: the text is lost, as if the
+        message itself were, and readers fall back to a mirror copy.
+        """
+        if message.document is not None or not message.text.startswith(OVERFLOW_PREFIX):
+            return message
+        try:
+            doc_id = int(message.text[len(OVERFLOW_PREFIX) :])
+        except ValueError:
+            return message
+        self._overflow_of[message.message_id] = doc_id
+        text = await self._overflow_text_of(doc_id)
+        if text is None:
+            return None
+        return MessageResp(message_id=message.message_id, text=text, document=None)
+
+    async def get_messages(self, ids: list[int]) -> list[Optional[MessageResp]]:
+        messages = await MessageBroker.get_messages(self, ids)
+        if not any(
+            m is not None and m.text and m.text.startswith(OVERFLOW_PREFIX)
+            for m in messages
+        ):
+            return messages
+        return [
+            await self._resolve_overflow(m) if m is not None else None for m in messages
+        ]
 
     async def get_pinned_message(self) -> MessageRespWithDocument:
         self.__try_acquire("TelegramStore.get_pinned_message")
@@ -399,6 +501,13 @@ class TelegramStore(MessageBroker, IStore):
         """
         if not force and not get_config().telegram.delete_messages_on_remove:
             return
+        message_ids = list(message_ids)
+        # A text message that overflowed takes its document along.
+        message_ids += [
+            doc_id
+            for mid in message_ids
+            if (doc_id := self._overflow_of.pop(mid, None)) is not None
+        ]
         unique_ids: List[int] = list({mid for mid in message_ids if mid > 0})
         if not unique_ids:
             return

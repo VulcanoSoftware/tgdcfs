@@ -196,6 +196,14 @@ Discord store partitions files into attachments of
 exceed a bot's 2000 characters as a small JSON attachment, and streams
 downloads from the CDN with HTTP range requests.
 
+Because a Discord part is small, a replica lists many of them: a 10 GB
+file mirrored to Discord has over a thousand part ids in its descriptor.
+A Telegram store therefore moves a descriptor longer than Telegram's 4096
+characters into a small `overflow.json` document as well; the text
+message keeps its id (the metadata refers to it) and points at the
+document, and reads resolve the pointer. A superseded document is deleted
+when the descriptor is edited again.
+
 Several bot tokens share the work round-robin. A Discord bot may edit
 its own messages only, so an edit of a descriptor or a replaced
 attachment is always made by the bot that sent the message: the store

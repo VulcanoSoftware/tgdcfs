@@ -26,6 +26,7 @@ from tgdcfs.reqres import (
     SendMessageResp,
     SendTextReq,
     Document,
+    SentFileMessage,
 )
 from tgdcfs.backends.telegram.interface import TDLibApi
 
@@ -584,3 +585,108 @@ class TestTelegramStore:
 
         with pytest.raises(MessageNotFound):
             await message_api._reupload_within(1)
+
+
+class TestTextOverflow:
+    """Texts above Telegram's 4096 characters go into a document; the text
+    message keeps its id and points at it."""
+
+    LONG = "{" + "x" * 5000 + "}"
+
+    @pytest.fixture
+    def store(self, mocker):
+        mocker.patch("tgdcfs.backends.telegram.store.limiter.try_acquire")
+        tdlib = mocker.Mock(spec=TDLibApi)
+        tdlib.bots = [mocker.Mock()]
+        tdlib.next_bot = mocker.Mock()
+        tdlib.account = None
+        tdlib.next_bot.send_text = AsyncMock(
+            return_value=SendMessageResp(message_id=10)
+        )
+        tdlib.next_bot.edit_message_text = AsyncMock(
+            return_value=SendMessageResp(message_id=10)
+        )
+        store = TelegramStore(tdlib, mocker.Mock(spec=tlt.PeerChannel))
+        docs = iter(range(900, 1000))
+        store.upload = AsyncMock(  # type: ignore[method-assign]
+            side_effect=lambda msg: [SentFileMessage(message_id=next(docs), size=1)]
+        )
+        store.delete_messages = AsyncMock()  # type: ignore[method-assign]
+        return store
+
+    @pytest.mark.asyncio
+    async def test_a_short_text_is_sent_as_it_is(self, store):
+        assert await store.send_text("{}") == 10
+        store.upload.assert_not_called()
+        assert store.tdlib.next_bot.send_text.call_args.args[0].text == "{}"
+
+    @pytest.mark.asyncio
+    async def test_a_long_text_goes_into_a_document(self, store):
+        assert await store.send_text(self.LONG) == 10
+
+        uploaded = store.upload.call_args.args[0]
+        assert uploaded.name == "overflow.json"
+        sent = store.tdlib.next_bot.send_text.call_args.args[0].text
+        assert sent == "TGDCFS_OVERFLOW:900"
+
+    @pytest.mark.asyncio
+    async def test_an_edit_keeps_the_message_id_and_drops_the_old_document(self, store):
+        await store.send_text(self.LONG)
+
+        assert await store.edit_message_text(10, self.LONG + " ") == 10
+        edited = store.tdlib.next_bot.edit_message_text.call_args.args[0]
+        assert edited.message_id == 10
+        assert edited.text == "TGDCFS_OVERFLOW:901"
+        store.delete_messages.assert_awaited_once_with([900], force=True)
+
+        # Short again: plain text, the last document goes too.
+        await store.edit_message_text(10, "{}")
+        assert store.tdlib.next_bot.edit_message_text.call_args.args[0].text == "{}"
+        store.delete_messages.assert_awaited_with([901], force=True)
+
+    @pytest.mark.asyncio
+    async def test_reads_resolve_the_marker(self, store, mocker):
+        mocker.patch(
+            "tgdcfs.backends.telegram.store.MessageBroker.get_messages",
+            AsyncMock(
+                return_value=[
+                    MessageResp(
+                        message_id=10, text="TGDCFS_OVERFLOW:77", document=None
+                    ),
+                    MessageResp(message_id=11, text="{}", document=None),
+                ]
+            ),
+        )
+
+        async def chunks():
+            yield self.LONG[:100].encode()
+            yield self.LONG[100:].encode()
+
+        store.download_file = AsyncMock(  # type: ignore[method-assign]
+            return_value=DownloadFileResp(chunks=chunks(), size=len(self.LONG))
+        )
+
+        first, second = await store.get_messages([10, 11])
+
+        assert first.message_id == 10 and first.text == self.LONG
+        assert second.text == "{}"
+        store.download_file.assert_awaited_once_with(77, 0, -1)
+        # The document is known now, so an edit replaces it.
+        await store.edit_message_text(10, "{}")
+        store.delete_messages.assert_awaited_once_with([77], force=True)
+
+    @pytest.mark.asyncio
+    async def test_a_lost_document_reads_as_a_missing_message(self, store, mocker):
+        mocker.patch(
+            "tgdcfs.backends.telegram.store.MessageBroker.get_messages",
+            AsyncMock(
+                return_value=[
+                    MessageResp(message_id=10, text="TGDCFS_OVERFLOW:77", document=None)
+                ]
+            ),
+        )
+        store.download_file = AsyncMock(  # type: ignore[method-assign]
+            side_effect=RuntimeError("gone")
+        )
+
+        assert await store.get_messages([10]) == [None]
