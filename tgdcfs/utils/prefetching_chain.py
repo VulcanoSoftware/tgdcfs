@@ -69,22 +69,37 @@ async def prefetching_chain(
     segments: Dict[int, _Segment] = {}
     started = 0
     current = 0
+    active_count = 0
+    closed = False
 
-    def start_window() -> None:
-        """Keep the next ``concurrency`` sources running."""
-        nonlocal started
-        limit = min(len(ordered), current + concurrency)
-        while started < limit:
-            queue: asyncio.Queue = asyncio.Queue(maxsize=queue_depth)
-            segments[started] = _Segment(
-                queue=queue,
-                task=asyncio.create_task(_pump(ordered[started], queue)),
-            )
+    max_lookahead = 2 * concurrency - 1 if concurrency > 1 else 1
+
+    def start_next() -> None:
+        nonlocal started, active_count
+        if closed:
+            return
+        limit = min(len(ordered), current + max_lookahead)
+        while active_count < concurrency and started < limit:
+            idx = started
             started += 1
+            queue: asyncio.Queue = asyncio.Queue(maxsize=queue_depth)
+            active_count += 1
+            task = asyncio.create_task(_pump_task(idx, ordered[idx], queue))
+            segments[idx] = _Segment(queue=queue, task=task)
+
+    async def _pump_task(
+        idx: int, source: AsyncIterable[bytes], queue: asyncio.Queue
+    ) -> None:
+        nonlocal active_count
+        try:
+            await _pump(source, queue)
+        finally:
+            active_count -= 1
+            start_next()
 
     try:
+        start_next()
         while current < len(ordered):
-            start_window()
             item = await segments[current].queue.get()
 
             if isinstance(item, _End):
@@ -96,7 +111,8 @@ async def prefetching_chain(
 
             yield item
     finally:
-        for segment in segments.values():
+        closed = True
+        for segment in list(segments.values()):
             segment.task.cancel()
         if segments:
             await asyncio.gather(
