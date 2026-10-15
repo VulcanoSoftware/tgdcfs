@@ -301,6 +301,49 @@ class TestUploaderFromStream:
         mock_client.save_file_part.assert_called()
 
     @pytest.mark.asyncio
+    async def test_stream_prefetching(self, mock_client):
+        """Test stream prefetching with max_buffer_size > 0."""
+        import asyncio
+        chunks = [b"chunk1", b"chunk2", b"chunk3"]
+        total_size = sum(len(c) for c in chunks)
+        stream = self.create_test_stream(chunks)
+
+        file_msg = FileMessageFromStream.new(
+            stream=stream, size=total_size, name="prefetch.txt", max_buffer_size=1024
+        )
+
+        await file_msg.open()
+        await asyncio.sleep(0.01)
+
+        read_data = await file_msg.read(total_size)
+        assert read_data == b"".join(chunks)
+        await file_msg.close()
+
+    @pytest.mark.asyncio
+    async def test_stream_prefetching_backpressure(self, mock_client):
+        """Test prefetching when data exceeds max_buffer_size and queue fills up."""
+        import asyncio
+        chunks = [b"a" * 100 for _ in range(50)]
+        total_size = sum(len(c) for c in chunks)
+        stream = self.create_test_stream(chunks)
+
+        # Buffer size smaller than total data (500 bytes max buffer vs 5000 bytes total)
+        file_msg = FileMessageFromStream.new(
+            stream=stream, size=total_size, name="backpressure.txt", max_buffer_size=500
+        )
+
+        await file_msg.open()
+        await asyncio.sleep(0.01)
+
+        read_part1 = await file_msg.read(2500)
+        assert len(read_part1) == 2500
+
+        read_part2 = await file_msg.read(2500)
+        assert len(read_part2) == 2500
+        assert read_part1 + read_part2 == b"a" * 5000
+        await file_msg.close()
+
+    @pytest.mark.asyncio
     async def test_stream_default_name(self, mock_client):
         chunks = [b"data"]
         total_size = sum(len(chunk) for chunk in chunks)
@@ -400,6 +443,21 @@ class TestErrorHandling:
         await uploader.upload()
 
         sleep.assert_awaited_once_with(17.0)
+
+    @pytest.mark.asyncio
+    async def test_upload_chunk_timeout_and_retry(self, mock_client, mocker, no_backoff):
+        """A part that times out is retried and succeeds."""
+        import asyncio
+        mock_client.save_file_part = mocker.AsyncMock(
+            side_effect=[asyncio.TimeoutError("Timed out"), SaveFilePartResp(success=True)]
+        )
+
+        file_msg = FileMessageFromBuffer.new(buffer=b"test data", name="timeout.txt")
+        uploader = FileUploader(client=mock_client, file_msg=file_msg)
+
+        uploaded_size = await uploader.upload()
+        assert uploaded_size == len(b"test data")
+        assert mock_client.save_file_part.call_count == 2
 
 
 class TestConcurrencyAndWorkers:

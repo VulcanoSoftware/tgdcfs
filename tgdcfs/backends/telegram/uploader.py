@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 MAX_PART_ATTEMPTS = 5
 RETRY_BASE_DELAY = 0.5
 RETRY_MAX_DELAY = 30.0
+CHUNK_UPLOAD_TIMEOUT = 60.0
 
 
 @dataclass
@@ -89,21 +90,27 @@ class FileUploader:
         for attempt in range(1, MAX_PART_ATTEMPTS + 1):
             try:
                 if self._is_big:
-                    rsp = await self.client.save_big_file_part(
-                        SaveBigFilePartReq(
-                            file_id=self._file_id,
-                            bytes=chunk.content,
-                            file_part=chunk.file_part,
-                            file_total_parts=self._total_parts,
-                        )
+                    rsp = await asyncio.wait_for(
+                        self.client.save_big_file_part(
+                            SaveBigFilePartReq(
+                                file_id=self._file_id,
+                                bytes=chunk.content,
+                                file_part=chunk.file_part,
+                                file_total_parts=self._total_parts,
+                            )
+                        ),
+                        timeout=CHUNK_UPLOAD_TIMEOUT,
                     )
                 else:
-                    rsp = await self.client.save_file_part(
-                        SaveFilePartReq(
-                            file_id=self._file_id,
-                            bytes=chunk.content,
-                            file_part=chunk.file_part,
-                        )
+                    rsp = await asyncio.wait_for(
+                        self.client.save_file_part(
+                            SaveFilePartReq(
+                                file_id=self._file_id,
+                                bytes=chunk.content,
+                                file_part=chunk.file_part,
+                            )
+                        ),
+                        timeout=CHUNK_UPLOAD_TIMEOUT,
                     )
 
                 if not rsp.success:

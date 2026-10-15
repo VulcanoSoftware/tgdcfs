@@ -301,10 +301,19 @@ class FileMessageFromBuffer(UploadableFileMessage):
         return chunk
 
 
+DEFAULT_MAX_STREAM_BUFFER_SIZE = 16 * 1024 * 1024  # 16 MiB
+
+
 @dataclass
 class FileMessageFromStream(UploadableFileMessage):
     stream: FileContent
     buffer: bytearray = field(default_factory=bytearray)
+    max_buffer_size: int = 0
+    _reader_started: bool = field(default=False, repr=False)
+    _reader_task: Optional[asyncio.Task] = field(default=None, repr=False)
+    _queue: Optional[asyncio.Queue[Optional[bytes]]] = field(default=None, repr=False)
+    _queue_done: bool = field(default=False, repr=False)
+    _stream_exception: Optional[Exception] = field(default=None, repr=False)
 
     @classmethod
     def new(
@@ -312,6 +321,7 @@ class FileMessageFromStream(UploadableFileMessage):
         stream: FileContent,
         size: int,
         name: str = "unnamed",
+        max_buffer_size: int = 0,
     ) -> "FileMessageFromStream":
         return cls(
             name=name,
@@ -322,7 +332,33 @@ class FileMessageFromStream(UploadableFileMessage):
             size=size,
             task_tracker=None,
             _read_size=0,
+            max_buffer_size=max_buffer_size,
         )
+
+    def _ensure_reader(self) -> None:
+        if self.max_buffer_size > 0 and not self._reader_started:
+            self._reader_started = True
+            queue_max = max(1, self.max_buffer_size // 524288)
+            self._queue = asyncio.Queue(maxsize=queue_max)
+            self._reader_task = asyncio.create_task(self._bg_reader())
+
+    async def _bg_reader(self) -> None:
+        try:
+            while True:
+                try:
+                    chunk = await anext(self.stream)
+                except StopAsyncIteration:
+                    break
+                if self._queue is not None:
+                    await self._queue.put(chunk)
+        except Exception as ex:
+            self._stream_exception = ex
+        finally:
+            if self._queue is not None:
+                await self._queue.put(None)
+
+    async def open(self) -> None:
+        self._ensure_reader()
 
     async def read(self, length: int) -> bytes:
         """Take ``length`` bytes off the front of the stream.
@@ -331,14 +367,47 @@ class FileMessageFromStream(UploadableFileMessage):
         on every read copies everything still pending, which for a stream
         arriving in small chunks is quadratic in the size of the part.
         """
+        self._ensure_reader()
         size_to_return = min(length, self.get_size() - self._read_size)
-        while len(self.buffer) < size_to_return:
-            self.buffer.extend(await anext(self.stream))
+        if size_to_return <= 0:
+            return b""
 
-        res = bytes(self.buffer[:size_to_return])
-        del self.buffer[:size_to_return]
-        self._read_size += size_to_return
-        return res
+        if self.max_buffer_size > 0 and self._queue is not None:
+            while len(self.buffer) < size_to_return and not self._queue_done:
+                item = await self._queue.get()
+                if item is None:
+                    self._queue_done = True
+                else:
+                    self.buffer.extend(item)
+
+            if len(self.buffer) < size_to_return and self._stream_exception:
+                raise self._stream_exception
+
+            actual_return = min(size_to_return, len(self.buffer))
+            res = bytes(self.buffer[:actual_return])
+            del self.buffer[:actual_return]
+            self._read_size += actual_return
+            return res
+        else:
+            while len(self.buffer) < size_to_return:
+                try:
+                    chunk = await anext(self.stream)
+                    self.buffer.extend(chunk)
+                except StopAsyncIteration:
+                    break
+
+            res = bytes(self.buffer[:size_to_return])
+            del self.buffer[:size_to_return]
+            self._read_size += len(res)
+            return res
+
+    async def close(self) -> None:
+        if self._reader_task and not self._reader_task.done():
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except asyncio.CancelledError:
+                pass
 
 
 @dataclass
