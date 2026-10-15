@@ -39,16 +39,26 @@ jobs:
       - name: Prepare build
         id: prep
         env:
-          REPOSITORY: ${{ matrix.repository }}
+          NAME: ${{ matrix.name }}
+          DEFAULT_REPO: ${{ matrix.repository }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          REPO_OWNER: ${{ github.repository_owner }}
         run: |
           # Tags come from the commit, never from the branch name, so they are
           # stable regardless of how a branch is called or renamed.
+          if [ -n "${DOCKERHUB_USERNAME}" ]; then
+            repo_name=$(echo "${DOCKERHUB_USERNAME}/${NAME}" | tr '[:upper:]' '[:lower:]')
+          elif [ -n "${REPO_OWNER}" ]; then
+            repo_name=$(echo "${REPO_OWNER}/${NAME}" | tr '[:upper:]' '[:lower:]')
+          else
+            repo_name="${DEFAULT_REPO}"
+          fi
           short="${GITHUB_SHA::12}"
-          image="${REPOSITORY}:preview-${short}"
+          image="${repo_name}:preview-${short}"
           {
             echo "image=${image}"
-            echo "tags=${REPOSITORY}:preview,${image}"
+            echo "tags=${repo_name}:preview,${image}"
             # Forks have no access to the registry secrets; there the job still
             # builds and smoke-tests, it just does not publish.
             echo "can_push=$([ -n "${DOCKERHUB_TOKEN}" ] && echo true || echo false)"
@@ -130,6 +140,7 @@ jobs:
 
       - name: Push ${{ matrix.name }}
         if: steps.prep.outputs.can_push == 'true'
+        continue-on-error: true
         uses: docker/build-push-action@v7
         with:
           context: .

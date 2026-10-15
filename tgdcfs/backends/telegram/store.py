@@ -378,7 +378,7 @@ class TelegramStore(MessageBroker, IStore):
         else:
             api = self.tdlib.next_bot
 
-        uploader = FileUploader(api, file_msg)
+        uploader = FileUploader(api, file_msg, close_file=False)
         logger.info(
             f"Uploading file {file_msg.name} of size {file_msg.size} bytes to "
             f"channel {self.private_file_channel} using {(await api.get_me()).name}."
@@ -421,42 +421,46 @@ class TelegramStore(MessageBroker, IStore):
         parts in the air at once, each through its own bot; a stream is
         read front to back and goes part by part.
         """
-        size = file_msg.get_size()
-        file_name = file_msg.name or "unnamed"
-        part_size, premium_upload = self._part_size_for(size)
-        parts = list(self._partition(size, part_size))
+        await file_msg.open()
+        try:
+            size = file_msg.get_size()
+            file_name = file_msg.name or "unnamed"
+            part_size, premium_upload = self._part_size_for(size)
+            parts = list(self._partition(size, part_size))
 
-        in_flight = _transfer().upload_parts_in_flight
-        part_of = getattr(file_msg, "part", None)
-        if len(parts) > 1 and in_flight > 1 and callable(part_of):
-            slots = asyncio.Semaphore(in_flight)
-            offsets = [sum(parts[:i]) for i in range(len(parts))]
+            in_flight = _transfer().upload_parts_in_flight
+            part_of = getattr(file_msg, "part", None)
+            if len(parts) > 1 and in_flight > 1 and callable(part_of):
+                slots = asyncio.Semaphore(in_flight)
+                offsets = [sum(parts[:i]) for i in range(len(parts))]
 
-            async def send(index: int) -> SentFileMessage:
-                async with slots:
-                    part_msg = part_of(offsets[index], parts[index])
-                    part_msg.name = f"[part{index + 1}]{file_name}"
-                    part_msg.size = parts[index]
-                    return await self._send_file(
-                        part_msg, use_account_api=premium_upload
-                    )
+                async def send(index: int) -> SentFileMessage:
+                    async with slots:
+                        part_msg = part_of(offsets[index], parts[index])
+                        part_msg.name = f"[part{index + 1}]{file_name}"
+                        part_msg.size = parts[index]
+                        return await self._send_file(
+                            part_msg, use_account_api=premium_upload
+                        )
 
-            tasks = [asyncio.create_task(send(i)) for i in range(len(parts))]
-            try:
-                return list(await asyncio.gather(*tasks))
-            except BaseException:
-                for task in tasks:
-                    task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
-                raise
+                tasks = [asyncio.create_task(send(i)) for i in range(len(parts))]
+                try:
+                    return list(await asyncio.gather(*tasks))
+                except BaseException:
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    raise
 
-        res: List[SentFileMessage] = []
-        for i, part in enumerate(parts):
-            file_msg.name = f"[part{i + 1}]{file_name}"
-            file_msg.size = part
-            res.append(await self._send_file(file_msg, use_account_api=premium_upload))
-            file_msg.next_part(part)
-        return res
+            res: List[SentFileMessage] = []
+            for i, part in enumerate(parts):
+                file_msg.name = f"[part{i + 1}]{file_name}"
+                file_msg.size = part
+                res.append(await self._send_file(file_msg, use_account_api=premium_upload))
+                file_msg.next_part(part)
+            return res
+        finally:
+            await file_msg.close()
 
     async def replace_document(self, message_id: int, buffer: bytes, name: str) -> int:
         file_msg: FileMessageFromBuffer = FileMessageFromBuffer.new(

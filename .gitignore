@@ -7,3 +7,5 @@ sftp_host_key.pub
 dist/
 coverage.xml
 .coverage
+.mypy_cache/
+.pytest_cache/

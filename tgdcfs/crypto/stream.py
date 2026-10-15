@@ -114,6 +114,10 @@ class EncryptingFileMessage(UploadableFileMessage):
     async def close(self) -> None:
         await self.inner.close()
 
+    def next_part(self, part_size: int) -> None:
+        super().next_part(part_size)
+        self.inner.next_part(part_size)
+
     async def read(self, length: int) -> bytes:
         """Return up to ``length`` ciphertext bytes.
 

@@ -5,6 +5,7 @@ from typing import AsyncIterator
 
 from tgdcfs.errors import FileOrDirectoryDoesNotExist, InvalidPath
 from tgdcfs.reqres import (
+    DEFAULT_MAX_STREAM_BUFFER_SIZE,
     FileMessageEmpty,
     FileMessageFromBuffer,
     FileMessageFromPath,
@@ -256,6 +257,7 @@ class Ops:
                 name=basename,
                 stream=stream,
                 size=size,
+                max_buffer_size=DEFAULT_MAX_STREAM_BUFFER_SIZE,
             ),
         )
 
