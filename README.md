@@ -2,7 +2,7 @@
 [![Docker build](https://img.shields.io/github/actions/workflow/status/Xyvran/tgdcfs/docker-publish.yml?branch=master&style=for-the-badge&label=docker%20build)](https://github.com/Xyvran/tgdcfs/actions/workflows/docker-publish.yml)
 [![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=for-the-badge&logo=docker&logoColor=white)](https://hub.docker.com/r/xyvran/tgdcfs)
 
-# tgdcfs
+# TGDCFS
 
 Telegram and Discord as storage backends behind one WebDAV and SFTP
 server.
