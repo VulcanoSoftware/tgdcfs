@@ -388,18 +388,17 @@ class FileMessageFromStream(UploadableFileMessage):
             del self.buffer[:actual_return]
             self._read_size += actual_return
             return res
-        else:
-            while len(self.buffer) < size_to_return:
-                try:
-                    chunk = await anext(self.stream)
-                    self.buffer.extend(chunk)
-                except StopAsyncIteration:
-                    break
+        while len(self.buffer) < size_to_return:
+            try:
+                chunk = await anext(self.stream)
+                self.buffer.extend(chunk)
+            except StopAsyncIteration:
+                break
 
-            res = bytes(self.buffer[:size_to_return])
-            del self.buffer[:size_to_return]
-            self._read_size += len(res)
-            return res
+        res = bytes(self.buffer[:size_to_return])
+        del self.buffer[:size_to_return]
+        self._read_size += len(res)
+        return res
 
     async def close(self) -> None:
         if self._reader_task and not self._reader_task.done():
