@@ -201,8 +201,9 @@ class FileUploader:
                 worker.cancel()
             await asyncio.gather(*workers, return_exceptions=True)
             raise
+        finally:
+            await self._close()
 
-        await self._close()
         return self._file_size
 
     def get_uploaded_file(self) -> UploadedFile:
