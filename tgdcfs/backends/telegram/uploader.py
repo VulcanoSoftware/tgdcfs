@@ -53,9 +53,11 @@ class FileUploader:
         client: ITDLibClient,
         file_msg: UploadableFileMessage,
         workers: Optional[WorkersConfig] = None,
+        close_file: bool = True,
     ):
         self.client = client
         self._file_msg = file_msg
+        self._close_file = close_file
         self._file_size = self._file_msg.get_size()
         self._file_name = self._file_msg.file_name()
 
@@ -202,7 +204,8 @@ class FileUploader:
             await asyncio.gather(*workers, return_exceptions=True)
             raise
         finally:
-            await self._close()
+            if self._close_file:
+                await self._close()
 
         return self._file_size
 

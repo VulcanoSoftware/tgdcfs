@@ -160,7 +160,7 @@ class TestParallelParts:
         file_msg = SeekableMockFileMessage("big.bin", size)
         seen: list[tuple[str, int, int]] = []
 
-        def build_uploader(api, msg):
+        def build_uploader(api, msg, *args, **kwargs):
             seen.append((msg.name, msg.offset, msg.size))
             return mock_uploader
 
@@ -187,7 +187,7 @@ class TestParallelParts:
         file_msg = MockFileMessage("big.bin", size)
         seen = []
 
-        def build_uploader(api, msg):
+        def build_uploader(api, msg, *args, **kwargs):
             seen.append(msg.name)
             return mock_uploader
 
@@ -238,7 +238,7 @@ class TestUpload:
         file_msg = MockFileMessage("document.pdf", int(2.1 * 1024 * 1024 * 1024))
         seen = []
 
-        def build_uploader(api, msg):
+        def build_uploader(api, msg, *args, **kwargs):
             seen.append(msg.name)
             return mock_uploader
 
@@ -297,6 +297,49 @@ class TestUpload:
         await store.upload(MockFileMessage("small.bin", 100))
 
         assert uploader_cls.call_args[0][0] is mock_tdlib.next_bot
+
+    @pytest.mark.asyncio
+    async def test_multipart_stream_upload(self, mock_tdlib, mocker):
+        from tgdcfs.reqres import FileMessageFromStream, SaveFilePartResp, SendMessageResp
+
+        mock_tdlib.next_bot.save_file_part = mocker.AsyncMock(
+            return_value=SaveFilePartResp(success=True)
+        )
+        mock_tdlib.next_bot.save_big_file_part = mocker.AsyncMock(
+            return_value=SaveFilePartResp(success=True)
+        )
+        mock_tdlib.next_bot.send_big_file = mocker.AsyncMock(
+            return_value=SendMessageResp(message_id=101)
+        )
+        mock_tdlib.next_bot.send_small_file = mocker.AsyncMock(
+            return_value=SendMessageResp(message_id=102)
+        )
+
+        store = TelegramStore(mock_tdlib, 123456789, key="tg:123456789")
+
+        part_bytes = PART_SIZE_DEFAULT
+        total_size = 2 * part_bytes
+
+        async def chunk_generator():
+            chunk_size = 512 * 1024
+            emitted = 0
+            while emitted < total_size:
+                size = min(chunk_size, total_size - emitted)
+                yield b"x" * size
+                emitted += size
+
+        file_msg = FileMessageFromStream.new(
+            stream=chunk_generator(),
+            size=total_size,
+            name="stream.bin",
+            max_buffer_size=16 * 1024 * 1024,
+        )
+
+        res = await store.upload(file_msg)
+
+        assert len(res) == 2
+        assert res[0].message_id in (101, 102)
+        assert res[1].message_id in (101, 102)
 
 
 class TestReplaceDocument:
