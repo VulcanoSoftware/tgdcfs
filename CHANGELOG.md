@@ -45,6 +45,12 @@ the fact on the commits that shipped them.
   Such descriptors now go into a small `overflow.json` document that the
   descriptor message points at; the message keeps its id. Older versions
   cannot read these descriptors.
+- Files whose descriptor went into an `overflow.json` document no longer
+  show up with 0 bytes after a restart. The document was read "to the end"
+  (`-1`), which only the block cache understood; with `chunk_cache_mb: 0`
+  (the default) the download was refused as an invalid range, the
+  descriptor counted as lost and the file as empty. Nothing was lost: the
+  files read correctly again with this fix.
 - With `sync: tee` an upload is no longer written to the local cache as
   well, as the README already promised: the mirrors take the bytes from the
   upload stream, so the staged copy was never read and only cost disk space

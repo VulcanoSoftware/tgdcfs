@@ -487,6 +487,50 @@ class TestTelegramStore:
         assert result == mock_response
 
     @pytest.mark.asyncio
+    async def test_download_file_to_the_end_without_the_block_cache(
+        self, message_api, mock_tdlib, mocker
+    ):
+        # ``end == -1`` reads to the end of the document; the clients take
+        # an inclusive range, so the store resolves it to the last byte.
+        mocker.patch(
+            "tgdcfs.backends.telegram.store.MessageBroker.get_messages",
+            AsyncMock(
+                return_value=[
+                    MessageResp(
+                        message_id=77,
+                        text="",
+                        document=Document(
+                            size=6000,
+                            id=1,
+                            access_hash=1,
+                            file_reference=b"",
+                            mime_type=None,
+                        ),
+                    )
+                ]
+            ),
+        )
+        mock_response = Mock(spec=DownloadFileResp, chunks=AsyncMock(), size=6000)
+        mock_tdlib.next_bot.download_file.return_value = mock_response
+
+        assert await message_api.download_file(77, 0, -1) == mock_response
+        req = mock_tdlib.next_bot.download_file.call_args[0][0]
+        assert (req.begin, req.end) == (0, 5999)
+
+    @pytest.mark.asyncio
+    async def test_download_file_to_the_end_of_a_missing_message(
+        self, message_api, mock_tdlib, mocker
+    ):
+        mocker.patch(
+            "tgdcfs.backends.telegram.store.MessageBroker.get_messages",
+            AsyncMock(return_value=[None]),
+        )
+
+        with pytest.raises(MessageNotFound):
+            await message_api.download_file(77, 0, -1)
+        mock_tdlib.next_bot.download_file.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_copy_within_forwards_in_one_call(self, message_api, mock_tdlib):
         mock_tdlib.next_bot.forward_messages = AsyncMock(
             return_value=[
@@ -690,3 +734,50 @@ class TestTextOverflow:
         )
 
         assert await store.get_messages([10]) == [None]
+
+    @pytest.mark.asyncio
+    async def test_a_marker_resolves_after_a_restart(self, store, mocker):
+        # Nothing in memory, no block cache: the document is read through
+        # the real download path, which must turn ``-1`` into its last byte.
+        text = self.LONG.encode()
+        mocker.patch(
+            "tgdcfs.backends.telegram.store.MessageBroker.get_messages",
+            AsyncMock(
+                side_effect=lambda _store, ids: [
+                    (
+                        MessageResp(
+                            message_id=77,
+                            text="",
+                            document=Document(
+                                size=len(text),
+                                id=1,
+                                access_hash=1,
+                                file_reference=b"",
+                                mime_type=None,
+                            ),
+                        )
+                        if mid == 77
+                        else MessageResp(
+                            message_id=10, text="TGDCFS_OVERFLOW:77", document=None
+                        )
+                    )
+                    for mid in ids
+                ]
+            ),
+        )
+
+        async def download(req: DownloadFileReq) -> DownloadFileResp:
+            assert req.end >= req.begin
+
+            async def chunks():
+                yield text[req.begin : req.end + 1]
+
+            return DownloadFileResp(chunks=chunks(), size=req.end - req.begin + 1)
+
+        store.tdlib.next_bot.download_file = AsyncMock(side_effect=download)
+
+        (message,) = await store.get_messages([10])
+
+        assert message is not None and message.text == self.LONG
+        req = store.tdlib.next_bot.download_file.call_args.args[0]
+        assert (req.begin, req.end) == (0, len(text) - 1)

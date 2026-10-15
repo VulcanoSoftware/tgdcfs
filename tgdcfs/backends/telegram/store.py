@@ -784,6 +784,15 @@ class TelegramStore(MessageBroker, IStore):
     async def _download_uncached(
         self, message_id: int, begin: int, end: int
     ) -> DownloadFileResp:
+        # ``end == -1`` means the end of the document, but the clients below
+        # take an inclusive range and refuse an end before the begin. Only
+        # the block cache resolved it so far, and that is off by default:
+        # an overflow descriptor, read with ``-1``, then failed to load.
+        if end < 0:
+            size = await self._document_size(message_id)
+            if size is None:
+                raise MessageNotFound(message_id=message_id)
+            end = size - 1
         if (
             (account_config := get_config().telegram.account)
             and account_config.used_to_download
