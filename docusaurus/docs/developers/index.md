@@ -96,6 +96,6 @@ Provides persistent asynchronous file replication across Telegram and Discord st
 
 ## Next Steps for Developers
 
-- 🛠️ [Local Repository Setup](./local-setup.md) – How to clone, set up Python 3.13+, Poetry, and git hooks.
+- 🛠️ [Local Repository Setup](./local-setup.md) – How to clone, set up Python 3.13+, Poetry, git hooks, and build/test Docker containers locally.
 - 🧪 [Testing & QA Guide](./testing-and-qa.md) – Running pytest, typechecking, linting, and offline fake store tests.
-- 🤝 [Contributing Guidelines](./contributing.md) – Pull request process, commit conventions, preview builds, and release workflows.
+- 🤝 [Contributing Guidelines](./contributing.md) – GitHub fork setup, repository secrets, CI/CD workflow guide, commit conventions, and releases.
