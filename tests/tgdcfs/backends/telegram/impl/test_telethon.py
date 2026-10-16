@@ -49,6 +49,8 @@ class TestTelethonAPI:
     @pytest.fixture
     def mock_client(self, mocker) -> AsyncMock:
         client = mocker.AsyncMock(spec=TelegramClient)
+        client.is_connected.return_value = True
+        client.connect = mocker.AsyncMock()
         client.get_messages = mocker.AsyncMock()
         client.send_message = mocker.AsyncMock()
         client.edit_message = mocker.AsyncMock()
@@ -96,6 +98,21 @@ class TestTelethonAPI:
     def test_init(self, mock_client):
         api = TelethonAPI(mock_client)
         assert api._client == mock_client
+
+    @pytest.mark.asyncio
+    async def test_reconnects_when_disconnected(self, mock_client, mock_chat, mocker):
+        mock_client.is_connected.return_value = False
+        mock_sent_message = mocker.Mock()
+        mock_sent_message.id = 111
+        mock_client.send_message.return_value = mock_sent_message
+
+        api = TelethonAPI(mock_client)
+        req = SendTextReq(chat=mock_chat, text="Hello reconnect")
+
+        res = await api.send_text(req)
+
+        mock_client.connect.assert_awaited_once()
+        assert res.message_id == 111
 
     @pytest.mark.asyncio
     async def test_get_messages_raises_error_on_invalid_response(

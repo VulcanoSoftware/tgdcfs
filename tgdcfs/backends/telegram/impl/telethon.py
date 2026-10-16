@@ -70,12 +70,24 @@ class TelethonAPI(ITDLibClient):
         self._transfer_clients: List[TelegramClient] = [client, *extra_connections]
         self.__transfer_cycle = cycle(self._transfer_clients)
 
+    @staticmethod
+    async def _ensure_connected(client: TelegramClient) -> TelegramClient:
+        if not client.is_connected():
+            await client.connect()
+        return client
+
     @property
-    def _transfer_client(self) -> TelegramClient:
-        return next(self.__transfer_cycle)
+    async def _connected_primary_client(self) -> TelegramClient:
+        return await self._ensure_connected(self._client)
+
+    @property
+    async def _connected_transfer_client(self) -> TelegramClient:
+        client = next(self.__transfer_cycle)
+        return await self._ensure_connected(client)
 
     async def __get_messages(self, *args, **kwargs) -> Sequence[tlt.Message]:
-        messages = await self._client.get_messages(*args, **kwargs)
+        client = await self._connected_primary_client
+        messages = await client.get_messages(*args, **kwargs)
         if not isinstance(messages, TotalList):
             raise TechnicalError("Unexpected response type from get_messages")
         return messages
@@ -129,7 +141,8 @@ class TelethonAPI(ITDLibClient):
         return GetMessagesResp(cache.gets(req.message_ids))
 
     async def send_text(self, req: SendTextReq) -> SendMessageResp:
-        message = await self._client.send_message(
+        client = await self._connected_primary_client
+        message = await client.send_message(
             entity=PeerChannel(channel_id=req.chat), message=req.text
         )
         return SendMessageResp(message_id=message.id)
@@ -137,7 +150,8 @@ class TelethonAPI(ITDLibClient):
     async def edit_message_text(self, req: EditMessageTextReq) -> SendMessageResp:
         channel_cache(req.chat).id[req.message_id] = None
         chunk_cache().invalidate(req.chat, req.message_id)
-        message = await self._client.edit_message(
+        client = await self._connected_primary_client
+        message = await client.edit_message(
             entity=PeerChannel(channel_id=req.chat),
             message=req.message_id,
             text=req.text,
@@ -147,7 +161,8 @@ class TelethonAPI(ITDLibClient):
     async def edit_message_media(self, req: EditMessageMediaReq) -> Message:
         channel_cache(req.chat).id[req.message_id] = None
         chunk_cache().invalidate(req.chat, req.message_id)
-        message = await self._client.edit_message(
+        client = await self._connected_primary_client
+        message = await client.edit_message(
             entity=PeerChannel(channel_id=req.chat),
             message=req.message_id,
             file=tlt.InputFile(
@@ -185,14 +200,16 @@ class TelethonAPI(ITDLibClient):
         )
 
     async def pin_message(self, req: PinMessageReq) -> None:
-        await self._client.pin_message(
+        client = await self._connected_primary_client
+        await client.pin_message(
             entity=PeerChannel(channel_id=req.chat),
             message=req.message_id,
             notify=False,
         )
 
     async def save_big_file_part(self, req: SaveBigFilePartReq) -> SaveFilePartResp:
-        success = await self._transfer_client(
+        transfer_client = await self._connected_transfer_client
+        success = await transfer_client(
             tlf.upload.SaveBigFilePartRequest(
                 file_id=req.file_id,
                 file_part=req.file_part,
@@ -203,7 +220,8 @@ class TelethonAPI(ITDLibClient):
         return SaveFilePartResp(success=success)
 
     async def save_file_part(self, req: SaveFilePartReq) -> SaveFilePartResp:
-        success = await self._transfer_client(
+        transfer_client = await self._connected_transfer_client
+        success = await transfer_client(
             tlf.upload.SaveFilePartRequest(
                 file_id=req.file_id,
                 file_part=req.file_part,
@@ -218,7 +236,8 @@ class TelethonAPI(ITDLibClient):
             parts=req.file.parts,
             name=req.file.name,
         )
-        message = await self._client.send_file(
+        client = await self._connected_primary_client
+        message = await client.send_file(
             entity=PeerChannel(channel_id=req.chat),
             file=file,
             caption=req.caption,
@@ -235,7 +254,8 @@ class TelethonAPI(ITDLibClient):
             name=req.file.name,
             md5_checksum="",
         )
-        message = await self._client.send_file(
+        client = await self._connected_primary_client
+        message = await client.send_file(
             entity=PeerChannel(channel_id=req.chat),
             file=file,
             caption=req.caption,
@@ -246,7 +266,8 @@ class TelethonAPI(ITDLibClient):
         return SendMessageResp(message_id=message.id)
 
     async def forward_messages(self, req: ForwardMessagesReq) -> list[SendMessageResp]:
-        forwarded = await self._client.forward_messages(
+        client = await self._connected_primary_client
+        forwarded = await client.forward_messages(
             entity=PeerChannel(channel_id=req.to_chat),
             messages=list(req.message_ids),
             from_peer=PeerChannel(channel_id=req.from_chat),
@@ -303,8 +324,9 @@ class TelethonAPI(ITDLibClient):
             while rest > 0:
                 aligned = offset - offset % DOWNLOAD_REQUEST_SIZE
                 skip = offset - aligned
+                transfer_client = await self._connected_transfer_client
                 try:
-                    async for chunk in self._transfer_client.iter_download(
+                    async for chunk in transfer_client.iter_download(
                         file=InputDocumentFileLocation(
                             id=doc.id,
                             access_hash=doc.access_hash,
@@ -357,7 +379,8 @@ class TelethonAPI(ITDLibClient):
         for mid in req.message_ids:
             cache[mid] = None
             chunk_cache().invalidate(req.chat, mid)
-        await self._client.delete_messages(
+        client = await self._connected_primary_client
+        await client.delete_messages(
             entity=PeerChannel(channel_id=req.chat),
             message_ids=list(req.message_ids),
         )
@@ -366,13 +389,15 @@ class TelethonAPI(ITDLibClient):
         try:
             return int(channel_id)
         except ValueError:
-            entity = await self._client.get_entity(f"@{channel_id}")
+            client = await self._connected_primary_client
+            entity = await client.get_entity(f"@{channel_id}")
             if not isinstance(entity, tlt.Channel):
                 raise TechnicalError("Expected a Telegram channel")
             return entity.id
 
     async def _get_me(self) -> GetMeResp:
-        me = await self._client.get_me()
+        client = await self._connected_primary_client
+        me = await client.get_me()
         if not isinstance(me, tlt.User):
             raise TechnicalError("Expected a Telegram user")
         return GetMeResp(
