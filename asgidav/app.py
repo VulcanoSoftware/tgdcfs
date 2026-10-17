@@ -285,9 +285,13 @@ def create_app(
             if not isinstance(parent, Folder):
                 return CONFLICT(f"Parent {parent_path} is not a folder.")
             if member := await parent.member(folder_name):
-                if isinstance(member, Folder):
-                    return CREATED
-                return CONFLICT(f"Resource {path} is a file.")
+                # RFC 4918 9.3.1: MKCOL can only be performed on a deleted or
+                # non-existent resource. If target exists, return 405 Method Not Allowed.
+                return Response(
+                    status_code=HTTPStatus.METHOD_NOT_ALLOWED,
+                    content=f"Resource {path} already exists.",
+                    headers=common_headers,
+                )
             try:
                 await parent.create_folder(folder_name)
             except NotImplementedError as e:
