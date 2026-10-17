@@ -364,7 +364,7 @@ class TelegramStore(MessageBroker, IStore):
     # -- uploads -----------------------------------------------------------
 
     @staticmethod
-    def _partition(size: int, part_size: int) -> Generator[int]:
+    def _partition(size: int, part_size: int) -> Generator[int, None, None]:
         parts = (size + part_size - 1) // part_size
         for _ in range(parts - 1):
             yield part_size

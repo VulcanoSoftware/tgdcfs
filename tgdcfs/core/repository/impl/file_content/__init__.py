@@ -228,7 +228,7 @@ class StoreFileContentRepository(IFileContentRepository):
     @staticmethod
     def _get_file_part_to_download(
         fv: TGFSFileVersion, begin: int, end: int
-    ) -> Generator[tuple[int, int, int]]:
+    ) -> Generator[tuple[int, int, int], None, None]:
         for (
             _,
             message_id,
@@ -240,7 +240,7 @@ class StoreFileContentRepository(IFileContentRepository):
     @staticmethod
     def _get_file_parts_indexed(
         fv: TGFSFileVersion, begin: int, end: int
-    ) -> Generator[tuple[int, int, int, int]]:
+    ) -> Generator[tuple[int, int, int, int], None, None]:
         """Map ``[begin, end]`` onto the primary layout of ``fv``."""
         yield from StoreFileContentRepository._map_range(
             fv.message_ids, fv.part_sizes, fv.size, fv.id, begin, end
@@ -254,7 +254,7 @@ class StoreFileContentRepository(IFileContentRepository):
         version_id: str,
         begin: int,
         end: int,
-    ) -> Generator[tuple[int, int, int, int]]:
+    ) -> Generator[tuple[int, int, int, int], None, None]:
         """Map the inclusive byte range ``[begin, end]`` onto parts.
 
         Yields ``(part index, message id, begin, end)`` with the bounds

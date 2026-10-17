@@ -32,7 +32,7 @@ DEFAULT_SLOTS = 2
 # Maps ``[begin, end]`` of a version onto ``(part index, message id,
 # begin within the part, end within the part)`` for one store's layout.
 RangeMapper = Callable[
-    [List[int], List[int], int, str, int, int], Generator[tuple[int, int, int, int]]
+    [List[int], List[int], int, str, int, int], Generator[tuple[int, int, int, int], None, None]
 ]
 
 

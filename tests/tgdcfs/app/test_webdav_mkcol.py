@@ -47,15 +47,14 @@ class TestMkcol:
         assert mkcol(http, "/test/src/sub").status_code == 201
         ops.cd("/src/sub")
 
-    def test_an_existing_folder_is_reported_as_created(self, http):
-        assert mkcol(http, "/test/src").status_code == 201
-        assert mkcol(http, "/test/src").status_code == 201
+    def test_an_existing_folder_returns_405_method_not_allowed(self, http):
+        assert mkcol(http, "/test/src").status_code == 405
 
     @pytest.mark.asyncio
-    async def test_an_existing_file_is_a_conflict(self, http, ops):
+    async def test_an_existing_file_returns_405_method_not_allowed(self, http, ops):
         await ops.upload_from_bytes(b"x", "/src/a.txt")
 
-        assert mkcol(http, "/test/src/a.txt").status_code == 409
+        assert mkcol(http, "/test/src/a.txt").status_code == 405
 
     def test_missing_parent_is_a_conflict(self, http):
         assert mkcol(http, "/test/nope/sub").status_code == 409
