@@ -2,13 +2,15 @@ import {themes as prismThemes} from 'prism-react-renderer';
 import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 
+const baseUrl = process.env.DOCS_BASE_URL || (process.env.VERCEL ? '/' : '/tgdcfs/docs/');
+
 const config: Config = {
   title: 'TGDCFS',
   tagline: 'Telegram & Discord as WebDAV and SFTP Storage Backends',
   favicon: 'img/favicon.ico',
 
-  url: 'https://tgdcfs.vercel.app',
-  baseUrl: '/',
+  url: process.env.VERCEL ? 'https://tgdcfs-docs.vercel.app' : 'https://xyvran.github.io',
+  baseUrl: baseUrl,
 
   organizationName: 'Xyvran',
   projectName: 'tgdcfs',
@@ -32,6 +34,7 @@ const config: Config = {
       {
         docs: {
           sidebarPath: './sidebars.ts',
+          routeBasePath: '/',
           editUrl: 'https://github.com/Xyvran/tgdcfs/tree/master/docusaurus/',
         },
         blog: false,
@@ -43,7 +46,6 @@ const config: Config = {
   ],
 
   themeConfig: {
-    image: 'img/docusaurus-social-card.jpg',
     colorMode: {
       defaultMode: 'dark',
       respectPrefersColorScheme: true,
@@ -88,15 +90,15 @@ const config: Config = {
           items: [
             {
               label: 'User Guide',
-              to: '/docs/users/',
+              to: '/users/',
             },
             {
               label: 'Technical User Guide',
-              to: '/docs/technical-users/',
+              to: '/technical-users/',
             },
             {
               label: 'Developer Guide',
-              to: '/docs/developers/',
+              to: '/developers/',
             },
           ],
         },
@@ -121,7 +123,7 @@ const config: Config = {
           title: 'Community & License',
           items: [
             {
-              label: 'MIT License',
+              label: 'Apache 2.0 License',
               href: 'https://github.com/Xyvran/tgdcfs/blob/master/LICENSE',
             },
             {

@@ -19,17 +19,17 @@ function HomepageHeader() {
         <div className={styles.buttons} style={{display: 'flex', gap: '1rem', justifyContent: 'center', flexWrap: 'wrap', marginTop: '1.5rem'}}>
           <Link
             className="button button--secondary button--lg"
-            to="/docs/users/">
+            to="/users/">
             👤 User Guide
           </Link>
           <Link
             className="button button--secondary button--lg"
-            to="/docs/technical-users/">
+            to="/technical-users/">
             🛠️ Technical User Guide
           </Link>
           <Link
             className="button button--secondary button--lg"
-            to="/docs/developers/">
+            to="/developers/">
             💻 Developer Guide
           </Link>
         </div>
@@ -52,7 +52,7 @@ function AudienceCards() {
                 </p>
               </div>
               <div style={{marginTop: '1rem'}}>
-                <Link className="button button--primary button--block" to="/docs/users/">
+                <Link className="button button--primary button--block" to="/users/">
                   Read User Guide →
                 </Link>
               </div>
@@ -68,7 +68,7 @@ function AudienceCards() {
                 </p>
               </div>
               <div style={{marginTop: '1rem'}}>
-                <Link className="button button--primary button--block" to="/docs/technical-users/">
+                <Link className="button button--primary button--block" to="/technical-users/">
                   Read Technical Guide →
                 </Link>
               </div>
@@ -84,7 +84,7 @@ function AudienceCards() {
                 </p>
               </div>
               <div style={{marginTop: '1rem'}}>
-                <Link className="button button--primary button--block" to="/docs/developers/">
+                <Link className="button button--primary button--block" to="/developers/">
                   Read Developer Guide →
                 </Link>
               </div>
