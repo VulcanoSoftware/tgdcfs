@@ -41,6 +41,7 @@ jobs:
         env:
           REPOSITORY: ${{ matrix.repository }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
           # Tags come from the commit, never from the branch name, so they are
           # stable regardless of how a branch is called or renamed.
@@ -49,9 +50,10 @@ jobs:
           {
             echo "image=${image}"
             echo "tags=${REPOSITORY}:preview,${image}"
-            # Forks have no access to the registry secrets; there the job still
-            # builds and smoke-tests, it just does not publish.
-            echo "can_push=$([ -n "${DOCKERHUB_TOKEN}" ] && echo true || echo false)"
+            # Forks or PRs without write permissions/tokens on the target DockerHub repo
+            # have no access to valid push credentials; there the job still builds and smoke-tests,
+            # it just does not publish.
+            echo "can_push=$([ -n "${DOCKERHUB_TOKEN}" ] && [ -n "${DOCKERHUB_USERNAME}" ] && [ "${{ github.repository_owner }}" = "Xyvran" ] && echo true || echo false)"
           } >> "$GITHUB_OUTPUT"
 
       - name: Set up Buildx
