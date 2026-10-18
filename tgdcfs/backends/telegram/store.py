@@ -373,6 +373,13 @@ class TelegramStore(MessageBroker, IStore):
     async def _send_file(
         self, file_msg: UploadableFileMessage, use_account_api: bool
     ) -> SentFileMessage:
+        uploader, size = await self._upload_part(file_msg, use_account_api)
+        return await self._send_uploaded(uploader, size, file_msg.name)
+
+    async def _upload_part(
+        self, file_msg: UploadableFileMessage, use_account_api: bool
+    ) -> tuple[FileUploader, int]:
+        """Move the bytes of one part to Telegram, without sending it yet."""
         if use_account_api and (account_api := self.tdlib.account):
             api = account_api
         else:
@@ -383,15 +390,19 @@ class TelegramStore(MessageBroker, IStore):
             f"Uploading file {file_msg.name} of size {file_msg.size} bytes to "
             f"channel {self.private_file_channel} using {(await api.get_me()).name}."
         )
-        size = await uploader.upload()
+        return uploader, await uploader.upload()
 
+    async def _send_uploaded(
+        self, uploader: FileUploader, size: int, name: Optional[str]
+    ) -> SentFileMessage:
+        """Turn an uploaded part into a channel message, retrying until it is."""
         while True:
             try:
                 message = await uploader.send(self.private_file_channel)
                 return SentFileMessage(message_id=message.message_id, size=size)
             except Exception as ex:
                 logger.error(
-                    f"Exception occurred when sending file {file_msg.name}: {ex}. "
+                    f"Exception occurred when sending file {name}: {ex}. "
                     f"Waiting {SEND_RETRY_INTERVAL} seconds before retrying."
                 )
                 await asyncio.sleep(SEND_RETRY_INTERVAL)
@@ -420,6 +431,12 @@ class TelegramStore(MessageBroker, IStore):
         in the local cache) can have ``transfer.upload_parts_in_flight``
         parts in the air at once, each through its own bot; a stream is
         read front to back and goes part by part.
+
+        For a stream, sending a finished part runs in the background while
+        the next part is already being read. Telegram can take a minute or
+        more to turn a 2 GB upload into a message; reading nothing from the
+        client in that time made WebDAV clients give up on an idle
+        connection (FileZilla after 20 seconds).
         """
         size = file_msg.get_size()
         file_name = file_msg.name or "unnamed"
@@ -450,13 +467,26 @@ class TelegramStore(MessageBroker, IStore):
                 await asyncio.gather(*tasks, return_exceptions=True)
                 raise
 
-        res: List[SentFileMessage] = []
-        for i, part in enumerate(parts):
-            file_msg.name = f"[part{i + 1}]{file_name}"
-            file_msg.size = part
-            res.append(await self._send_file(file_msg, use_account_api=premium_upload))
-            file_msg.next_part(part)
-        return res
+        sends: List[asyncio.Task[SentFileMessage]] = []
+        try:
+            for i, part in enumerate(parts):
+                file_msg.name = f"[part{i + 1}]{file_name}"
+                file_msg.size = part
+                uploader, uploaded = await self._upload_part(
+                    file_msg, use_account_api=premium_upload
+                )
+                sends.append(
+                    asyncio.create_task(
+                        self._send_uploaded(uploader, uploaded, file_msg.name)
+                    )
+                )
+                file_msg.next_part(part)
+            return list(await asyncio.gather(*sends))
+        except BaseException:
+            for task in sends:
+                task.cancel()
+            await asyncio.gather(*sends, return_exceptions=True)
+            raise
 
     async def replace_document(self, message_id: int, buffer: bytes, name: str) -> int:
         file_msg: FileMessageFromBuffer = FileMessageFromBuffer.new(
