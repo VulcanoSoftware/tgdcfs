@@ -7,8 +7,8 @@ const config: Config = {
   tagline: 'Telegram & Discord as WebDAV and SFTP Storage Backends',
   favicon: 'img/favicon.ico',
 
-  url: 'https://tgdcfs.vercel.app',
-  baseUrl: '/',
+  url: 'https://xyvran.github.io',
+  baseUrl: '/tgdcfs/docs/',
 
   organizationName: 'Xyvran',
   projectName: 'tgdcfs',
@@ -32,6 +32,7 @@ const config: Config = {
       {
         docs: {
           sidebarPath: './sidebars.ts',
+          routeBasePath: '/',
           editUrl: 'https://github.com/Xyvran/tgdcfs/tree/master/docusaurus/',
         },
         blog: false,
@@ -43,7 +44,6 @@ const config: Config = {
   ],
 
   themeConfig: {
-    image: 'img/docusaurus-social-card.jpg',
     colorMode: {
       defaultMode: 'dark',
       respectPrefersColorScheme: true,
@@ -88,15 +88,15 @@ const config: Config = {
           items: [
             {
               label: 'User Guide',
-              to: '/docs/users/',
+              to: '/users/',
             },
             {
               label: 'Technical User Guide',
-              to: '/docs/technical-users/',
+              to: '/technical-users/',
             },
             {
               label: 'Developer Guide',
-              to: '/docs/developers/',
+              to: '/developers/',
             },
           ],
         },
@@ -121,7 +121,7 @@ const config: Config = {
           title: 'Community & License',
           items: [
             {
-              label: 'MIT License',
+              label: 'Apache 2.0 License',
               href: 'https://github.com/Xyvran/tgdcfs/blob/master/LICENSE',
             },
             {
