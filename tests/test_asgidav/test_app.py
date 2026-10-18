@@ -84,3 +84,110 @@ class TestClientDisconnect:
         assert sent[0]["status"] == HTTPStatus.BAD_REQUEST
         assert "Client disconnected during PROPFIND /folder/" in caplog.text
         assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+class TestPutOverwrite:
+    def test_put_new_and_overwrite(self):
+        from fastapi.testclient import TestClient
+        from asgidav.folder import Folder
+        from asgidav.resource import Resource
+
+        class MemoryResource(Resource):
+            def __init__(self, name):
+                super().__init__(f"/{name}")
+                self._data = b""
+
+            async def overwrite(self, content, size):
+                chunks = []
+                async for chunk in content:
+                    chunks.append(chunk)
+                self._data = b"".join(chunks)
+
+            async def content_length(self):
+                return len(self._data)
+
+            async def content_type(self):
+                return "text/plain"
+
+            async def last_modified(self):
+                return 0
+
+            async def creation_date(self):
+                return 0
+
+            async def display_name(self):
+                return "file.txt"
+
+            async def get_content(self, begin=0, end=-1):
+                async def gen():
+                    yield self._data
+                return gen()
+
+            async def remove(self):
+                pass
+
+            async def copy_to(self, dest):
+                pass
+
+            async def move_to(self, dest):
+                pass
+
+        class MemoryFolder(Folder):
+            def __init__(self):
+                super().__init__("/")
+                self.members = {}
+
+            async def display_name(self):
+                return "root"
+
+            async def member_names(self):
+                return tuple(self.members.keys())
+
+            async def member(self, path):
+                clean = path.strip("/")
+                if clean == "":
+                    return self
+                return self.members.get(clean)
+
+            async def create_empty_resource(self, path):
+                clean = path.strip("/")
+                res = MemoryResource(clean)
+                self.members[clean] = res
+                return res
+
+            async def create_folder(self, name):
+                pass
+
+            async def creation_date(self):
+                return 0
+
+            async def last_modified(self):
+                return 0
+
+            async def remove(self):
+                pass
+
+            async def copy_to(self, dest):
+                pass
+
+            async def move_to(self, dest):
+                pass
+
+        root_folder = MemoryFolder()
+
+        async def get_member(path):
+            clean = path.strip("/")
+            if clean == "":
+                return root_folder
+            return await root_folder.member(clean)
+
+        app = create_app(get_member)
+        client = TestClient(app)
+
+        # PUT new file -> 201 Created
+        resp1 = client.put("/file.txt", content=b"hello", headers={"Content-Length": "5"})
+        assert resp1.status_code == 201
+
+        # PUT existing file -> 204 No Content
+        resp2 = client.put("/file.txt", content=b"world!", headers={"Content-Length": "6"})
+        assert resp2.status_code == 204

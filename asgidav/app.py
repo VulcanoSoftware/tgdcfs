@@ -255,7 +255,9 @@ def create_app(
     async def put(request: Request, path: str):
         content_length = request.headers.get("Content-Length", "0")
         size = int(content_length)
-        if not (member := await get_member(path)):
+        member = await get_member(path)
+        is_new = member is None
+        if is_new:
             parent_path, _ = split_path(path)
             if not isinstance(await get_member(parent_path), Folder):
                 # RFC 4918 9.7.1: a PUT does not create the collections on
@@ -268,7 +270,7 @@ def create_app(
         if isinstance(member, Resource):
             if size > 0:
                 await member.overwrite(request.stream(), size=size)
-            return CREATED
+            return CREATED if is_new else NO_CONTENT
         return CONFLICT("Cannot PUT to a directory")
 
     @app.delete("/{path:path}")

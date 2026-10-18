@@ -72,6 +72,10 @@ class TestPut:
         assert http.put("/test/src/a.txt", content=b"x" * 5).status_code == 201
         ops.stat_file("/src/a.txt")
 
+    def test_overwrites_an_existing_file(self, http, ops):
+        assert http.put("/test/src/a.txt", content=b"x" * 5).status_code == 201
+        assert http.put("/test/src/a.txt", content=b"y" * 10).status_code == 204
+
     def test_a_missing_parent_is_a_conflict(self, http):
         """RFC 4918 9.7.1 -- PUT does not create the folders on the way."""
         assert http.put("/test/nope/a.txt", content=b"x").status_code == 409
