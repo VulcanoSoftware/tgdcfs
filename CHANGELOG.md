@@ -30,6 +30,16 @@ the fact on the commits that shipped them.
 
 ### Fixed
 
+- Uploads above 2 GB over WebDAV no longer time out between Telegram parts.
+  A streamed file goes to Telegram in parts of up to 2000 MiB, and after
+  each part Telegram can take a minute or more to turn it into a message.
+  Nothing was read from the client in that time, so FileZilla gave up after
+  20 seconds ("Connection timed out after 20 seconds of inactivity") and the
+  file stayed at 0 bytes. The next part is now read while the previous one
+  is being sent.
+- An upload that the client aborts is now logged as a warning
+  (`Client disconnected during PUT …`) instead of at debug level, so a file
+  left behind incomplete shows up in the server log.
 - A large upload into a cache full of small entries no longer freezes the
   server. Making room for it rewrote the cache index after every evicted
   entry on the event loop; with about 10,000 cached files that held every
