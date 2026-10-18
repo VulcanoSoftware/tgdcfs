@@ -2,13 +2,15 @@ import {themes as prismThemes} from 'prism-react-renderer';
 import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 
+const baseUrl = process.env.DOCS_BASE_URL || (process.env.VERCEL ? '/' : '/tgdcfs/docs/');
+
 const config: Config = {
   title: 'TGDCFS',
   tagline: 'Telegram & Discord as WebDAV and SFTP Storage Backends',
   favicon: 'img/favicon.ico',
 
-  url: 'https://xyvran.github.io',
-  baseUrl: '/tgdcfs/docs/',
+  url: process.env.VERCEL ? 'https://tgdcfs-docs.vercel.app' : 'https://xyvran.github.io',
+  baseUrl: baseUrl,
 
   organizationName: 'Xyvran',
   projectName: 'tgdcfs',
