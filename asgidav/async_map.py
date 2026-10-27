@@ -6,9 +6,17 @@ U = TypeVar("U")
 
 
 async def async_map(
-    func: Callable[[T], Coroutine[Any, Any, U]], iterable: Iterable[T]
+    func: Callable[[T], Coroutine[Any, Any, U]],
+    iterable: Iterable[T],
+    limit: int = 50,
 ) -> List[U]:
+    semaphore = asyncio.Semaphore(limit)
+
+    async def sem_func(item: T) -> U:
+        async with semaphore:
+            return await func(item)
+
     tasks: List[asyncio.Task[U]] = [
-        asyncio.create_task(func(item)) for item in iterable
+        asyncio.create_task(sem_func(item)) for item in iterable
     ]
     return await asyncio.gather(*tasks)
