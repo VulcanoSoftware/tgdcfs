@@ -28,10 +28,10 @@ jobs:
         include:
           - name: tgdcfs
             dockerfile: Dockerfile
-            repository: xyvran/tgdcfs
+            repository: vulcanosoftware/tgdcfs
           - name: tgdcfs-fe
             dockerfile: Dockerfile.frontend
-            repository: xyvran/tgdcfs-fe
+            repository: vulcanosoftware/tgdcfs-fe
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
