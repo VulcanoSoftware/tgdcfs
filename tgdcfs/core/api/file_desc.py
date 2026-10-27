@@ -59,9 +59,14 @@ class FileDescApi:
         return await self.append_file_version(file_msg, fr=None)
 
     async def get_file_desc(
-        self, fr: TGFSFileRef, include_all_versions: bool = False
+        self,
+        fr: TGFSFileRef,
+        include_all_versions: bool = False,
+        validate: bool = True,
     ) -> TGFSFileDesc:
-        return await self.__fd_repo.get(fr, include_all_versions)
+        if validate:
+            return await self.__fd_repo.get(fr, include_all_versions)
+        return await self.__fd_repo.get(fr, include_all_versions, validate=False)
 
     async def save_new_file_desc(self, fd: TGFSFileDesc) -> FDRepositoryResp:
         """Write ``fd`` to a brand new descriptor message.

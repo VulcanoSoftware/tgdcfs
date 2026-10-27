@@ -118,6 +118,10 @@ class TelethonAPI(ITDLibClient):
 
     async def get_messages(self, req: GetMessagesReq) -> GetMessagesResp:
         cache = channel_cache(req.chat).id
+        result_map = {
+            mid: msg for mid in req.message_ids if (msg := cache.get(mid)) is not None
+        }
+
         if message_id_to_fetch := cache.find_nonexistent(req.message_ids):
             fetched_messages = await self.__get_messages(
                 entity=PeerChannel(channel_id=req.chat), ids=message_id_to_fetch
@@ -125,8 +129,9 @@ class TelethonAPI(ITDLibClient):
 
             for message in exclude_none(self._transform_messages(fetched_messages)):
                 cache[message.message_id] = message
+                result_map[message.message_id] = message
 
-        return GetMessagesResp(cache.gets(req.message_ids))
+        return GetMessagesResp([result_map.get(mid) for mid in req.message_ids])
 
     async def send_text(self, req: SendTextReq) -> SendMessageResp:
         message = await self._client.send_message(

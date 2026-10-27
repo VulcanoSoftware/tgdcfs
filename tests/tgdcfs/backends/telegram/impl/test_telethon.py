@@ -147,10 +147,12 @@ class TestTelethonAPI:
         req = GetMessagesReq(chat=mock_chat, message_ids=(12345,))
 
         mock_cache = mocker.Mock()
-        mock_cache.find_nonexistent.return_value = []  # All messages cached
-        mock_cache.gets.return_value = [
+        mock_cache.get.side_effect = lambda mid: (
             MessageResp(message_id=12345, text="cached", document=None)
-        ]
+            if mid == 12345
+            else None
+        )
+        mock_cache.find_nonexistent.return_value = []  # All messages cached
 
         mock_channel_cache = mocker.patch(
             "tgdcfs.backends.telegram.impl.telethon.channel_cache"
@@ -164,6 +166,34 @@ class TestTelethonAPI:
         # Should not fetch from API if all messages are cached
         telethon_api._client.get_messages.assert_not_called()
         assert len(result) == 1
+        assert result[0].text == "cached"
+
+    @pytest.mark.asyncio
+    async def test_get_messages_returns_all_messages_when_batch_exceeds_cache_capacity(
+        self, telethon_api, mock_chat, mocker
+    ):
+        """When a batch fetch returns more messages than LRU capacity, returned list is complete."""
+        # Request 1500 message IDs
+        ids = tuple(range(1, 1501))
+        req = GetMessagesReq(chat=mock_chat, message_ids=ids)
+
+        fetched_list = []
+        for mid in ids:
+            msg = mocker.Mock(spec=tlt.Message)
+            msg.id = mid
+            msg.message = f"msg_{mid}"
+            msg.media = None
+            fetched_list.append(msg)
+
+        total_list = TotalList(fetched_list)
+        telethon_api._client.get_messages.return_value = total_list
+
+        result = await telethon_api.get_messages(req)
+
+        assert len(result) == 1500
+        assert all(r is not None for r in result)
+        assert result[0].message_id == 1
+        assert result[1499].message_id == 1500
 
     def test_transform_messages_with_text_only(self, mock_message):
         messages = [mock_message]

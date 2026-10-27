@@ -6,6 +6,12 @@ class TestMessageCache:
         cache = MessageCache[str, int]()
         assert cache._lru.get_size() == 1024
 
+    def test_custom_capacity_and_resize(self):
+        cache = MessageCache[str, int](capacity=2000)
+        assert cache._lru.get_size() == 2000
+        cache.set_capacity(5000)
+        assert cache._lru.get_size() == 5000
+
     def test_get_existing_key(self):
         cache = MessageCache[str, int]()
         cache["key1"] = 100

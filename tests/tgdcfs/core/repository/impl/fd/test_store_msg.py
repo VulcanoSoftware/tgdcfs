@@ -190,6 +190,38 @@ class TestGetMethod:
         mock_message_api.get_messages.assert_any_call([999])  # Get descriptor message
         mock_message_api.get_messages.assert_any_call([12345])  # Validate file content
 
+    @pytest.mark.asyncio
+    async def test_get_valid_message_with_validate_false(
+        self, repository, mock_message_api, sample_file_ref
+    ):
+        """Test getting file descriptor with validate=False skips content validation"""
+        mock_message = Mock()
+        mock_message.text = json.dumps(
+            {
+                "name": "test_file.txt",
+                "versions": [
+                    {
+                        "id": "v1",
+                        "updatedAt": int(
+                            datetime.datetime(2023, 1, 1).timestamp() * 1000
+                        ),
+                        "messageIds": [12345],
+                        "size": 1000,
+                    }
+                ],
+            }
+        )
+
+        mock_message_api.get_messages.return_value = [mock_message]
+
+        result = await repository.get(sample_file_ref, validate=False)
+
+        # Verify only descriptor message was fetched, no content part validation call
+        mock_message_api.get_messages.assert_called_once_with([999])
+        assert isinstance(result, TGFSFileDesc)
+        assert result.name == "test_file.txt"
+        assert len(result.versions) == 1
+
         # Verify result
         assert isinstance(result, TGFSFileDesc)
         assert result.name == "test_file.txt"

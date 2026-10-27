@@ -11,8 +11,11 @@ V = TypeVar("V")
 
 
 class MessageCache(Generic[K, V]):
-    def __init__(self):
-        self._lru = LRU(1024)  # type: LRU[K, V]
+    def __init__(self, capacity: int = 1024):
+        self._lru = LRU(capacity)  # type: LRU[K, V]
+
+    def set_capacity(self, capacity: int) -> None:
+        self._lru.set_size(capacity)
 
     def get(self, key: K) -> Optional[V]:
         return self._lru.get(key)
@@ -39,13 +42,34 @@ class ChannelMessageCache:
     search: MessageCache[str, Tuple[MessageResp, ...]]
 
 
-global_message_cache: DefaultDict[int, ChannelMessageCache] = defaultdict(
-    lambda: ChannelMessageCache(
-        id=MessageCache[int, Optional[MessageResp]](),
-        search=MessageCache[str, Tuple[MessageResp, ...]](),
+def _create_channel_cache() -> ChannelMessageCache:
+    from tgdcfs.config import get_config
+
+    capacity = 10000
+    try:
+        capacity = get_config().tgdcfs.transfer.message_cache_size
+    except Exception:
+        pass
+    return ChannelMessageCache(
+        id=MessageCache[int, Optional[MessageResp]](capacity=capacity),
+        search=MessageCache[str, Tuple[MessageResp, ...]](capacity=capacity),
     )
+
+
+global_message_cache: DefaultDict[int, ChannelMessageCache] = defaultdict(
+    _create_channel_cache
 )
 
 
 def channel_cache(channel_id: int) -> ChannelMessageCache:
-    return global_message_cache[channel_id]
+    cache = global_message_cache[channel_id]
+    try:
+        from tgdcfs.config import get_config
+
+        capacity = get_config().tgdcfs.transfer.message_cache_size
+        if cache.id._lru.get_size() != capacity:
+            cache.id.set_capacity(capacity)
+            cache.search.set_capacity(capacity)
+    except Exception:
+        pass
+    return cache

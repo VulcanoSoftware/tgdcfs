@@ -414,9 +414,16 @@ class FileApi:
             return await self._create_new_file(under, file_msg)
 
     async def desc(
-        self, fr: TGFSFileRef, include_all_versions: bool = False
+        self,
+        fr: TGFSFileRef,
+        include_all_versions: bool = False,
+        validate: bool = True,
     ) -> TGFSFileDesc:
-        return await self._file_desc_api.get_file_desc(fr, include_all_versions)
+        if validate:
+            return await self._file_desc_api.get_file_desc(fr, include_all_versions)
+        return await self._file_desc_api.get_file_desc(
+            fr, include_all_versions, validate=False
+        )
 
     async def retrieve(
         self,
