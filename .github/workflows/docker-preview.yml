@@ -53,7 +53,7 @@ jobs:
             # Forks or PRs without write permissions/tokens on the target DockerHub repo
             # have no access to valid push credentials; there the job still builds and smoke-tests,
             # it just does not publish.
-            echo "can_push=$([ -n "${DOCKERHUB_TOKEN}" ] && [ -n "${DOCKERHUB_USERNAME}" ] && [ "${{ github.repository_owner }}" = "Xyvran" ] && echo true || echo false)"
+            echo "can_push=$([ -n "${DOCKERHUB_TOKEN}" ] && [ -n "${DOCKERHUB_USERNAME}" ] && ([ "${{ github.repository_owner }}" = "VulcanoSoftware" ] || [ "${{ github.repository_owner }}" = "Xyvran" ]) && echo true || echo false)"
           } >> "$GITHUB_OUTPUT"
 
       - name: Set up Buildx
