@@ -49,7 +49,7 @@ def build_client(mocker, name: str) -> Client:
 
     client.file_api = mocker.Mock()
     client.file_api.desc = mocker.AsyncMock(
-        side_effect=lambda fr: build_file_desc(fr.name)
+        side_effect=lambda fr, **kw: build_file_desc(fr.name)
     )
     client.file_api.rm = mocker.AsyncMock()
     client.file_api.move = mocker.AsyncMock()

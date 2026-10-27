@@ -50,9 +50,9 @@ class Ops:
         # cannot find a subdirectory with the given name, so assume it's a file_content
         return self._client.dir_api.get_fr(d, basename)
 
-    async def desc(self, path: str) -> TGFSFileDesc:
+    async def desc(self, path: str, validate: bool = True) -> TGFSFileDesc:
         file_ref = self.stat_file(path)
-        return await self._client.file_api.desc(file_ref)
+        return await self._client.file_api.desc(file_ref, validate=validate)
 
     async def cp_dir(self, path_from: str, path_to: str) -> TGFSDirectory:
         """Recursively copy a directory into a new, independent one.

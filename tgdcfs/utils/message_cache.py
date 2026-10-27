@@ -11,8 +11,8 @@ V = TypeVar("V")
 
 
 class MessageCache(Generic[K, V]):
-    def __init__(self):
-        self._lru = LRU(1024)  # type: LRU[K, V]
+    def __init__(self, size: int = 10000):
+        self._lru = LRU(size)  # type: LRU[K, V]
 
     def get(self, key: K) -> Optional[V]:
         return self._lru.get(key)
@@ -39,10 +39,18 @@ class ChannelMessageCache:
     search: MessageCache[str, Tuple[MessageResp, ...]]
 
 
+_global_message_cache_size: int = 10000
+
+
+def set_message_cache_size(size: int) -> None:
+    global _global_message_cache_size
+    _global_message_cache_size = size
+
+
 global_message_cache: DefaultDict[int, ChannelMessageCache] = defaultdict(
     lambda: ChannelMessageCache(
-        id=MessageCache[int, Optional[MessageResp]](),
-        search=MessageCache[str, Tuple[MessageResp, ...]](),
+        id=MessageCache[int, Optional[MessageResp]](_global_message_cache_size),
+        search=MessageCache[str, Tuple[MessageResp, ...]](_global_message_cache_size),
     )
 )
 

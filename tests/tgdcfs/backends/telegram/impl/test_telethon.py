@@ -19,7 +19,7 @@ from tgdcfs.config import TransferConfig
 from tgdcfs.config import Config, TelegramConfig, BotConfig, AccountConfig
 from tgdcfs.errors import TechnicalError, UnDownloadableMessage
 from tgdcfs.utils.chunk_cache import ChunkCache
-from tgdcfs.utils.message_cache import global_message_cache
+from tgdcfs.utils.message_cache import channel_cache, global_message_cache
 from tgdcfs.reqres import (
     DeleteMessagesReq,
     GetMessagesReq,
@@ -139,6 +139,36 @@ class TestTelethonAPI:
             entity=tlt.PeerChannel(mock_chat), ids=[12345]
         )
         assert isinstance(result, list)
+
+    @pytest.mark.asyncio
+    async def test_get_messages_batch_returns_fetched_even_if_evicted(
+        self, telethon_api, mock_chat, mocker
+    ):
+        msg1 = mocker.Mock(spec=tlt.Message)
+        msg1.id = 1
+        msg1.message = "m1"
+        msg1.media = None
+
+        msg2 = mocker.Mock(spec=tlt.Message)
+        msg2.id = 2
+        msg2.message = "m2"
+        msg2.media = None
+
+        total_list = TotalList([msg1, msg2])
+        telethon_api._client.get_messages.return_value = total_list
+
+        req = GetMessagesReq(chat=mock_chat, message_ids=(1, 2))
+
+        # Set LRU capacity to 1 so msg1 is evicted when msg2 is added to cache
+        cache = channel_cache(mock_chat).id
+        from tgdcfs.utils.message_cache import MessageCache
+        cache._lru = MessageCache(1)._lru
+
+        result = await telethon_api.get_messages(req)
+
+        assert len(result) == 2
+        assert result[0] is not None and result[0].message_id == 1
+        assert result[1] is not None and result[1].message_id == 2
 
     @pytest.mark.asyncio
     async def test_get_messages_with_cached_messages(

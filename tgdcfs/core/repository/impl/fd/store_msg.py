@@ -326,7 +326,10 @@ class StoreFDRepository(IFDRepository):
         return None
 
     async def get(
-        self, fr: TGFSFileRef, include_all_versions: bool = False
+        self,
+        fr: TGFSFileRef,
+        include_all_versions: bool = False,
+        validate: bool = True,
     ) -> TGFSFileDesc:
         # After a promotion the ref may still describe the former primary;
         # re-express it relative to this store before touching anything.
@@ -342,4 +345,6 @@ class StoreFDRepository(IFDRepository):
         fd = TGFSFileDesc.from_dict(json.loads(text), name=fr.name)
         for version in fd.get_versions():
             version.relocate(self.key)
+        if not validate:
+            return fd
         return await self._validate_fv(fd, include_all_versions)

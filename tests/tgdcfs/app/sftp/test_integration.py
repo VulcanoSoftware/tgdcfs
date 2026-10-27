@@ -50,7 +50,7 @@ def build_client(mocker, name: str, channel: FakeChannel) -> Client:
     client.dir_api.rm_dangerously = mocker.AsyncMock()
     client.dir_api.move = mocker.AsyncMock()
 
-    def desc(fr):
+    def desc(fr, validate=True):
         fd = TGFSFileDesc(name=fr.name, created_at=CREATED_AT)
         fd.add_version(
             TGFSFileVersion(

@@ -4,7 +4,11 @@ from tgdcfs.utils.message_cache import MessageCache
 class TestMessageCache:
     def test_init(self):
         cache = MessageCache[str, int]()
-        assert cache._lru.get_size() == 1024
+        assert cache._lru.get_size() == 10000
+
+    def test_custom_size(self):
+        cache = MessageCache[str, int](500)
+        assert cache._lru.get_size() == 500
 
     def test_get_existing_key(self):
         cache = MessageCache[str, int]()

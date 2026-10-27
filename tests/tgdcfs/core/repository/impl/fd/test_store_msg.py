@@ -213,6 +213,41 @@ class TestGetMethod:
         assert len(result.versions) == 0  # Empty file descriptor
 
     @pytest.mark.asyncio
+    async def test_get_with_validate_false(
+        self, repository, mock_message_api, sample_file_ref
+    ):
+        """Test getting file descriptor with validate=False (skips content message lookups)"""
+        mock_message = Mock()
+        mock_message.text = json.dumps(
+            {
+                "name": "test_file.txt",
+                "versions": [
+                    {
+                        "id": "v1",
+                        "updatedAt": int(
+                            datetime.datetime(2023, 1, 1).timestamp() * 1000
+                        ),
+                        "messageIds": [12345],
+                        "size": 1000,
+                    }
+                ],
+            }
+        )
+
+        mock_message_api.get_messages.return_value = [mock_message]
+
+        result = await repository.get(
+            sample_file_ref, include_all_versions=False, validate=False
+        )
+
+        # Only one call to get_messages for descriptor, NO call for content validation
+        mock_message_api.get_messages.assert_called_once_with([999])
+
+        assert isinstance(result, TGFSFileDesc)
+        assert result.name == "test_file.txt"
+        assert len(result.versions) == 1
+
+    @pytest.mark.asyncio
     async def test_get_with_include_all_versions(
         self, repository, mock_message_api, sample_file_ref
     ):

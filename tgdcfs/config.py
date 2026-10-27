@@ -7,6 +7,7 @@ from typing import Dict, List, Literal, Optional, Self, TypedDict
 import yaml
 
 from tgdcfs.backends import BACKEND_NAMES, BACKEND_PREFIXES, make_store_key
+from tgdcfs.utils.message_cache import set_message_cache_size
 
 logger = logging.getLogger(__name__)
 
@@ -345,6 +346,7 @@ class TransferConfig:
     chunk_cache_mb: int
     chunk_cache_readahead: int
     chunk_cache_block_kb: int
+    message_cache_size: int = 10000
     # How many parts of one version the Telegram store uploads at once
     # when the source is seekable (a version in the local cache). A stream
     # is read front to back and always goes part by part.
@@ -374,6 +376,7 @@ class TransferConfig:
     DEFAULT_CHUNK_CACHE_MB = 0
     DEFAULT_CHUNK_CACHE_READAHEAD = 2
     DEFAULT_CHUNK_CACHE_BLOCK_KB = 1024
+    DEFAULT_MESSAGE_CACHE_SIZE = 10000
 
     @property
     def download_piece_size_bytes(self) -> int:
@@ -451,6 +454,9 @@ class TransferConfig:
             ),
             chunk_cache_block_kb=positive(
                 "chunk_cache_block_kb", cls.DEFAULT_CHUNK_CACHE_BLOCK_KB
+            ),
+            message_cache_size=positive(
+                "message_cache_size", cls.DEFAULT_MESSAGE_CACHE_SIZE
             ),
             upload_parts_in_flight=positive(
                 "upload_parts_in_flight", cls.DEFAULT_UPLOAD_PARTS_IN_FLIGHT
@@ -1208,6 +1214,7 @@ class Config:
             else None
         )
         app = TGFSConfig.from_dict(app_data)
+        set_message_cache_size(app.transfer.message_cache_size)
 
         if "stores" in data or "filesystems" in data:
             if telegram.private_file_channel:
