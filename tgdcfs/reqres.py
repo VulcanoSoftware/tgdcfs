@@ -34,6 +34,8 @@ class SentFileMessage(Message):
     # Copies of the whole version in stores that re-partitioned it, keyed
     # by store key. Carried by the first part's message only.
     replicas: Dict[str, "Replica"] = field(default_factory=dict)
+    # Unencrypted (plaintext) logical size when encryption is enabled.
+    plaintext_size: Optional[int] = None
 
 
 @dataclass

@@ -10,7 +10,12 @@ from tgdcfs.app.fs_cache import gfc
 from tgdcfs.app.utils import split_global_path
 from tgdcfs.config import Config
 from tgdcfs.core import Clients
-from tgdcfs.core.backfill import backfill_mirrors, count_files, create_backfill_task
+from tgdcfs.core.backfill import (
+    backfill_mirrors,
+    backfill_plaintext_sizes,
+    count_files,
+    create_backfill_task,
+)
 from tgdcfs.core.local_cache import LocalCache
 from tgdcfs.core.ops import Ops
 from tgdcfs.core.replication import ReplicationQueue
@@ -208,6 +213,23 @@ def create_manager_app(
                 await backfill_mirrors(client, verify=verify, task_id=task_id)
             except Exception:
                 logger.exception(f"Mirror backfill for '{client_name}' crashed")
+
+        asyncio.get_running_loop().create_task(run())
+        return {"task_id": task_id}
+
+    @app.post("/metadata/backfill/{client_name}")
+    async def start_metadata_backfill(client_name: str):
+        """Probe and record plaintext sizes for all files missing it."""
+        if (client := clients.get(client_name)) is None:
+            raise HTTPException(status_code=404, detail="Unknown client")
+
+        task_id = await create_backfill_task(client, count_files(client))
+
+        async def run() -> None:
+            try:
+                await backfill_plaintext_sizes(client, task_id=task_id)
+            except Exception:
+                logger.exception(f"Metadata backfill for '{client_name}' crashed")
 
         asyncio.get_running_loop().create_task(run())
         return {"task_id": task_id}

@@ -104,6 +104,10 @@ class TGFSFileVersion:
     # are gone, and serves the previous one until distribution completes.
     pending: bool = False
 
+    # Optional unencrypted (plaintext) logical size. Set when encryption is
+    # enabled so PROPFIND / content_length() doesn't need to probe header.
+    plaintext_size: Optional[int] = None
+
     # Whether reads of this version may go through the local read cache.
     # Not serialized: it is False only for the throwaway versions the
     # metadata repository builds around the pinned metadata blob, which
@@ -148,6 +152,8 @@ class TGFSFileVersion:
             res["store"] = self.store
         if self.pending:
             res["pending"] = True
+        if self.plaintext_size is not None:
+            res["plaintextSize"] = self.plaintext_size
         return res
 
     @staticmethod
@@ -191,6 +197,7 @@ class TGFSFileVersion:
         replicas: Dict[str, Replica] = {}
         for msg in messages:
             replicas.update(msg.replicas)
+        pt_size = messages[0].plaintext_size if messages and messages[0].plaintext_size is not None else None
         return TGFSFileVersion(
             id=version_id or str(uuid()),
             updated_at=datetime.datetime.now(),
@@ -199,6 +206,7 @@ class TGFSFileVersion:
             mirrors=mirrors,
             replicas=replicas,
             store=store,
+            plaintext_size=pt_size,
         )
 
     @staticmethod
@@ -214,6 +222,7 @@ class TGFSFileVersion:
             else:
                 message_ids = []
         pending = bool(data.get("pending"))
+        plaintext_size = data.get("plaintextSize")
         return TGFSFileVersion(
             id=data["id"],
             updated_at=updated_at,
@@ -237,6 +246,7 @@ class TGFSFileVersion:
                 for key, replica in (data.get("replicas") or {}).items()
             },
             store=(normalize_store_key(data["store"]) if data.get("store") else None),
+            plaintext_size=int(plaintext_size) if plaintext_size is not None else None,
         )
 
     def set_invalid(self):

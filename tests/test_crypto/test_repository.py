@@ -45,6 +45,7 @@ class _FakeFileVersion:
     size: int
     message_ids: List[int] = field(default_factory=list)
     part_sizes: List[int] = field(default_factory=list)
+    plaintext_size: Optional[int] = None
 
 
 class _InMemoryRepo(IFileContentRepository):
@@ -544,6 +545,66 @@ async def test_detection_cached_across_calls() -> None:
 
     hit, entry = repo._cache.lookup(fv.id)
     assert hit and entry is None  # cached as plaintext
+
+
+async def test_header_cache_lru_capacity_and_eviction() -> None:
+    from tgdcfs.crypto.repository import _HeaderCache
+    cache = _HeaderCache(capacity=2)
+    cache.put("v1", None)
+    cache.put("v2", None)
+    assert cache.lookup("v1")[0] is True
+    assert cache.lookup("v2")[0] is True
+    cache.put("v3", None)
+    # v1 should be evicted (LRU)
+    assert cache.lookup("v1")[0] is False
+    assert cache.lookup("v2")[0] is True
+    assert cache.lookup("v3")[0] is True
+
+
+async def test_single_flight_detect() -> None:
+    import asyncio
+    repo = _make_repo(chunk_size=4096)
+    plaintext = os.urandom(8192)
+    fv = await _save_and_get_fv(repo, plaintext)
+    repo._cache._lru.clear()
+
+    inner: _InMemoryRepo = repo._inner  # type: ignore[assignment]
+    inner_get_count = 0
+    orig_get = inner.get
+
+    async def spy_get(*args, **kwargs):
+        nonlocal inner_get_count
+        inner_get_count += 1
+        await asyncio.sleep(0.05)
+        return await orig_get(*args, **kwargs)
+
+    inner.get = spy_get  # type: ignore[assignment]
+
+    results = await asyncio.gather(
+        repo._detect(fv, "file1"),
+        repo._detect(fv, "file1"),
+        repo._detect(fv, "file1"),
+    )
+
+    assert len(results) == 3
+    assert results[0] is not None
+    assert results[0] == results[1] == results[2]
+    # Single-flight ensures only 1 inner probe read occurred
+    assert inner_get_count == 1
+
+
+async def test_content_length_zero_reads_when_plaintext_size_present() -> None:
+    repo = _make_repo(chunk_size=4096)
+    fv = _FakeFileVersion(id="v_pt", size=4200, message_ids=[100], part_sizes=[4200])
+    fv.plaintext_size = 4096  # Set explicit plaintext_size
+
+    inner: _InMemoryRepo = repo._inner  # type: ignore[assignment]
+    inner.admits.clear()
+
+    length = await repo.content_length(fv)
+    assert length == 4096
+    # Should make ZERO inner reads because plaintext_size is present on fv
+    assert len(inner.admits) == 0
 
 
 # --- the header probe and the read cache -----------------------------------

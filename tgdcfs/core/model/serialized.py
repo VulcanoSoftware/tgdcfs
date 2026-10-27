@@ -31,6 +31,9 @@ class TGFSFileVersionSerialized(TypedDict, total=False):
     # Store key that messageIds belong to. Absent for versions written by
     # tgfs (they belong to the configured primary).
     store: str
+    # Plaintext size (unencrypted size) when encryption is enabled.
+    # Absent when not encrypted or for un-backfilled legacy metadata.
+    plaintextSize: int
 
 
 class TGFSFileDescSerialized(TypedDict, total=False):

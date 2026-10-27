@@ -383,5 +383,63 @@ async def create_backfill_task(client: "Client", total_files: int) -> str:
     )
 
 
+async def backfill_plaintext_sizes(
+    client: "Client",
+    task_id: Optional[str] = None,
+    batch_size: int = 100,
+) -> int:
+    """Probe files missing plaintext_size in metadata and persist the size in batches."""
+    fd_repo = client.fd_repo
+    if fd_repo is None:
+        return 0
+
+    refs = _collect_file_refs(client.dir_api.root)
+    if task_id:
+        await task_store.update_task_progress(task_id, status=TaskStatus.IN_PROGRESS)
+
+    updated_count = 0
+    uncommitted = 0
+
+    for fr in refs:
+        try:
+            fd = await fd_repo.get(fr, include_all_versions=True, validate=False)
+            file_changed = False
+            for version in fd.get_versions():
+                if version.plaintext_size is None and version.is_valid():
+                    # Compute plaintext size using fc_repo.content_length
+                    version.plaintext_size = await client.fc_repo.content_length(version)
+                    file_changed = True
+
+            if file_changed:
+                resp = await fd_repo.save(fd, fr)
+                _sync_ref(fr, resp)
+                updated_count += 1
+                uncommitted += 1
+
+            if uncommitted >= batch_size and client.metadata_api:
+                await client.metadata_api.push()
+                uncommitted = 0
+
+        except Exception as ex:
+            logger.warning(f"Plaintext size backfill failed for {fr.name}: {ex}")
+
+        if task_id:
+            await task_store.update_task_progress(task_id, size_delta=1)
+
+    if uncommitted > 0 and client.metadata_api:
+        await client.metadata_api.push()
+
+    if task_id:
+        await task_store.update_task_progress(
+            task_id, status=TaskStatus.COMPLETED
+        )
+
+    logger.info(
+        f"Plaintext size backfill for '{client.name}' finished: "
+        f"updated {updated_count} files"
+    )
+    return updated_count
+
+
 def count_files(client: "Client") -> int:
     return len(_collect_file_refs(client.dir_api.root))

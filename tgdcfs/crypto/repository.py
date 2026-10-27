@@ -24,6 +24,7 @@ just with the ciphertext sizes substituted.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Iterable, List, Optional
 
@@ -52,44 +53,36 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+from lru import LRU  # type: ignore
+
 # Number of distinct files for which we cache parsed headers + derived keys.
-# Each entry is tiny (~150 bytes); 1024 is plenty for most workloads.
-_HEADER_CACHE_CAPACITY = 1024
+# Each entry is tiny (~150 bytes); 100_000 entries take ~15 MB.
+_HEADER_CACHE_CAPACITY = 100_000
 
 
 class _HeaderCache:
-    """Trivial bounded FIFO cache keyed by file version id.
+    """LRU cache keyed by file version id.
 
     A cached value of ``None`` marks a legacy *plaintext* file -- one that
     predates encryption and therefore must be passed through the inner repo
     unchanged. Caching that decision is important: without it, every range
     request would trigger a fresh header probe against Telegram.
-
-    A full LRU would be marginally better, but FIFO is fine for read-mostly
-    workloads and avoids pulling in another dependency.
     """
 
     def __init__(self, capacity: int = _HEADER_CACHE_CAPACITY) -> None:
         self._capacity = capacity
-        self._store: dict[str, Optional[tuple[FileHeader, bytes]]] = {}
-        self._order: list[str] = []
+        self._lru = LRU(capacity)  # type: LRU[str, Optional[tuple[FileHeader, bytes]]]
 
     def lookup(
         self, version_id: str
     ) -> tuple[bool, Optional[tuple[FileHeader, bytes]]]:
         """Return ``(hit, entry)``. ``entry is None`` on hit means plaintext."""
-        if version_id in self._store:
-            return True, self._store[version_id]
+        if version_id in self._lru:
+            return True, self._lru.get(version_id)
         return False, None
 
     def put(self, version_id: str, entry: Optional[tuple[FileHeader, bytes]]) -> None:
-        if version_id in self._store:
-            return
-        if len(self._store) >= self._capacity:
-            evict = self._order.pop(0)
-            self._store.pop(evict, None)
-        self._store[version_id] = entry
-        self._order.append(version_id)
+        self._lru[version_id] = entry
 
 
 class EncryptingFileContentRepository(IFileContentRepository):
@@ -113,10 +106,13 @@ class EncryptingFileContentRepository(IFileContentRepository):
             derive_name_key(master_key) if encrypt_names else None
         )
         self._cache = _HeaderCache()
+        self._inflight: dict[str, asyncio.Future] = {}
+        self._probe_semaphore = asyncio.Semaphore(20)
 
     # -- save --------------------------------------------------------------
 
     async def save(self, file_msg: UploadableFileMessage) -> List[SentFileMessage]:
+        plaintext_size = file_msg.get_size()
         if self._name_key is not None and file_msg.name:
             # Obfuscate the Telegram-visible document name BEFORE wrapping,
             # so the part-numbering loop downstream sees the encrypted form.
@@ -136,7 +132,11 @@ class EncryptingFileContentRepository(IFileContentRepository):
             encrypted.get_size(),
             (file_msg.get_size() + self._chunk_size - 1) // self._chunk_size,
         )
-        return await self._inner.save(encrypted)
+        sent = await self._inner.save(encrypted)
+        # Attach plaintext_size to first SentFileMessage so FileDescApi can carry it
+        if sent and plaintext_size >= 0:
+            sent[0].plaintext_size = plaintext_size
+        return sent
 
     async def stage(
         self, file_msg: UploadableFileMessage, version_id: str
@@ -280,6 +280,8 @@ class EncryptingFileContentRepository(IFileContentRepository):
     async def content_length(self, fv: "TGFSFileVersion") -> int:
         if fv.size <= 0:
             return 0
+        if getattr(fv, "plaintext_size", None) is not None:
+            return int(fv.plaintext_size)  # type: ignore[arg-type]
         # ``_detect`` already caches per file, so the second call from a HEAD
         # request or a Content-Range computation is free.
         detected = await self._detect(fv, "")
@@ -309,50 +311,76 @@ class EncryptingFileContentRepository(IFileContentRepository):
         if hit:
             return cached
 
-        # Files shorter than the magic itself can't be encrypted by us.
-        if fv.size < len(MAGIC):
-            self._cache.put(fv.id, None)
-            return None
+        if fv.id in self._inflight:
+            return await self._inflight[fv.id]
 
-        probe_target = min(HEADER_SIZE, fv.size)
-        # Inner ``get`` uses inclusive ends, so the last byte index is one
-        # less than the count. ``admit=False``: the loop below abandons the
-        # stream after the header, so admitting this read to the cache would
-        # reserve the whole version and never fill a block of it -- a
-        # PROPFIND asks for the content length of every listed file.
-        stream = await self._inner.get(fv, 0, probe_target - 1, name, admit=False)
-        buf = bytearray()
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        self._inflight[fv.id] = future
+
         try:
-            async for piece in stream:
-                buf += piece
-                if len(buf) >= probe_target:
-                    break
+            async with self._probe_semaphore:
+                # Re-check cache after acquiring semaphore in case another probe finished
+                hit, cached = self._cache.lookup(fv.id)
+                if hit:
+                    future.set_result(cached)
+                    return cached
+
+                # Files shorter than the magic itself can't be encrypted by us.
+                if fv.size < len(MAGIC):
+                    self._cache.put(fv.id, None)
+                    future.set_result(None)
+                    return None
+
+                probe_target = min(HEADER_SIZE, fv.size)
+                # Inner ``get`` uses inclusive ends, so the last byte index is one
+                # less than the count. ``admit=False``: the loop below abandons the
+                # stream after the header, so admitting this read to the cache would
+                # reserve the whole version and never fill a block of it -- a
+                # PROPFIND asks for the content length of every listed file.
+                stream = await self._inner.get(fv, 0, probe_target - 1, name, admit=False)
+                buf = bytearray()
+                try:
+                    async for piece in stream:
+                        buf += piece
+                        if len(buf) >= probe_target:
+                            break
+                finally:
+                    # The probe walks away mid-stream, so close the stream here
+                    # instead of leaving it to the garbage collector.
+                    await aclose_content(stream)
+
+                if len(buf) < len(MAGIC) or bytes(buf[: len(MAGIC)]) != MAGIC:
+                    self._cache.put(fv.id, None)
+                    future.set_result(None)
+                    return None
+
+                if len(buf) < HEADER_SIZE:
+                    raise InvalidHeaderError(
+                        f"file '{name}' starts with TGDCFS magic but is shorter than "
+                        f"the encryption header ({len(buf)} < {HEADER_SIZE} bytes)"
+                    )
+
+                raw_header = bytes(buf[:HEADER_SIZE])
+                header = FileHeader.parse(raw_header)
+                file_key = derive_file_key(self._master_key, header.file_salt)
+                # Authenticate the header. If this fails the master key is wrong
+                # or the header has been tampered with -- in either case we must
+                # refuse to decrypt anything.
+                FileHeader.verify(raw_header, file_key)
+
+                entry = (header, file_key)
+                self._cache.put(fv.id, entry)
+                future.set_result(entry)
+                return entry
+        except BaseException as ex:
+            if not future.done():
+                future.set_exception(ex)
+            raise
         finally:
-            # The probe walks away mid-stream, so close the stream here
-            # instead of leaving it to the garbage collector.
-            await aclose_content(stream)
-
-        if len(buf) < len(MAGIC) or bytes(buf[: len(MAGIC)]) != MAGIC:
-            self._cache.put(fv.id, None)
-            return None
-
-        if len(buf) < HEADER_SIZE:
-            raise InvalidHeaderError(
-                f"file '{name}' starts with TGDCFS magic but is shorter than "
-                f"the encryption header ({len(buf)} < {HEADER_SIZE} bytes)"
-            )
-
-        raw_header = bytes(buf[:HEADER_SIZE])
-        header = FileHeader.parse(raw_header)
-        file_key = derive_file_key(self._master_key, header.file_salt)
-        # Authenticate the header. If this fails the master key is wrong
-        # or the header has been tampered with -- in either case we must
-        # refuse to decrypt anything.
-        FileHeader.verify(raw_header, file_key)
-
-        entry = (header, file_key)
-        self._cache.put(fv.id, entry)
-        return entry
+            self._inflight.pop(fv.id, None)
+            if future.done() and not future.cancelled():
+                future.exception()
 
 
 def _plaintext_size_from_ciphertext(ciphertext_size: int, chunk_size: int) -> int:
