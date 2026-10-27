@@ -1,4 +1,5 @@
 from collections import defaultdict
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import DefaultDict, Generic, Iterable, List, Optional, Tuple, TypeVar
 
@@ -46,10 +47,8 @@ def _create_channel_cache() -> ChannelMessageCache:
     from tgdcfs.config import get_config
 
     capacity = 10000
-    try:
+    with suppress(Exception):
         capacity = get_config().tgdcfs.transfer.message_cache_size
-    except Exception:
-        pass
     return ChannelMessageCache(
         id=MessageCache[int, Optional[MessageResp]](capacity=capacity),
         search=MessageCache[str, Tuple[MessageResp, ...]](capacity=capacity),
@@ -63,13 +62,11 @@ global_message_cache: DefaultDict[int, ChannelMessageCache] = defaultdict(
 
 def channel_cache(channel_id: int) -> ChannelMessageCache:
     cache = global_message_cache[channel_id]
-    try:
+    with suppress(Exception):
         from tgdcfs.config import get_config
 
         capacity = get_config().tgdcfs.transfer.message_cache_size
         if cache.id._lru.get_size() != capacity:
             cache.id.set_capacity(capacity)
             cache.search.set_capacity(capacity)
-    except Exception:
-        pass
     return cache
