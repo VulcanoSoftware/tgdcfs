@@ -4,6 +4,8 @@ These tests used to target the file content repository; the store owns
 the partitioning now.
 """
 
+import asyncio
+
 import pytest
 
 from tgdcfs.backends.telegram.store import (
@@ -11,6 +13,7 @@ from tgdcfs.backends.telegram.store import (
     PART_SIZE_PREMIUM,
     TelegramStore,
 )
+from tgdcfs.errors import TechnicalError
 from tgdcfs.reqres import SentFileMessage, UploadableFileMessage
 
 
@@ -200,6 +203,89 @@ class TestParallelParts:
         assert len(result) == 3
         assert seen == ["[part1]big.bin", "[part2]big.bin", "[part3]big.bin"]
         assert file_msg._offset == size
+
+    @pytest.mark.asyncio
+    async def test_a_stream_reads_the_next_part_while_the_last_one_is_sent(
+        self, store, mocker
+    ):
+        size = int(2.5 * PART_SIZE_DEFAULT)
+        file_msg = MockFileMessage("big.bin", size)
+        events: list[str] = []
+        next_upload_started = asyncio.Event()
+
+        def build_uploader(api, msg):
+            name = msg.name
+            uploader = mocker.Mock()
+
+            async def upload():
+                events.append(f"upload {name}")
+                if name != "[part1]big.bin":
+                    next_upload_started.set()
+                return msg.size
+
+            async def send(chat):
+                # Telegram taking its time to turn the part into a message:
+                # this only returns once the next part is being read.
+                if name != "[part3]big.bin":
+                    await next_upload_started.wait()
+                events.append(f"send {name}")
+                return SentFileMessage(message_id=len(events), size=msg.size)
+
+            uploader.upload = upload
+            uploader.send = send
+            return uploader
+
+        mocker.patch(
+            "tgdcfs.backends.telegram.store.FileUploader", side_effect=build_uploader
+        )
+
+        result = await asyncio.wait_for(store.upload(file_msg), timeout=5)
+
+        assert events.index("upload [part2]big.bin") < events.index(
+            "send [part1]big.bin"
+        )
+        # The parts still come back in file order.
+        assert [r.size for r in result] == [
+            PART_SIZE_DEFAULT,
+            PART_SIZE_DEFAULT,
+            size - 2 * PART_SIZE_DEFAULT,
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_part_cancels_the_pending_sends(self, store, mocker):
+        file_msg = MockFileMessage("big.bin", int(2.5 * PART_SIZE_DEFAULT))
+        pending_send = asyncio.Event()
+        cancelled = []
+
+        def build_uploader(api, msg):
+            name = msg.name
+            uploader = mocker.Mock()
+
+            async def upload():
+                if name == "[part2]big.bin":
+                    await pending_send.wait()
+                    raise TechnicalError("client went away")
+                return msg.size
+
+            async def send(chat):
+                pending_send.set()
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    cancelled.append(name)
+                    raise
+
+            uploader.upload = upload
+            uploader.send = send
+            return uploader
+
+        mocker.patch(
+            "tgdcfs.backends.telegram.store.FileUploader", side_effect=build_uploader
+        )
+
+        with pytest.raises(TechnicalError, match="client went away"):
+            await asyncio.wait_for(store.upload(file_msg), timeout=5)
+        assert cancelled == ["[part1]big.bin"]
 
     def test_plan_parts_matches_the_partitioning(self, store):
         size = int(2.5 * PART_SIZE_DEFAULT)

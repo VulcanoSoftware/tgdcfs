@@ -105,7 +105,17 @@ def create_app(
     async def client_disconnected(request: Request, exc: ClientDisconnect):
         # The client hung up while its body was still being read. Nobody is
         # left to answer, so this is not a server error worth a traceback.
-        logger.debug(f"Client disconnected during {request.method} {request.url.path}")
+        # An aborted upload is worth a line, though: the file stays behind
+        # incomplete and the client log is often the only other trace.
+        if request.method == "PUT":
+            logger.warning(
+                f"Client disconnected during PUT {request.url.path}; "
+                f"the upload was aborted before the whole body arrived"
+            )
+        else:
+            logger.debug(
+                f"Client disconnected during {request.method} {request.url.path}"
+            )
         return Response(status_code=HTTPStatus.BAD_REQUEST)
 
     @app.options(path="/{path:path}")

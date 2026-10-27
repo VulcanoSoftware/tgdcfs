@@ -5,6 +5,8 @@ import pytest
 
 from asgidav.app import create_app, extract_path_from_destination, split_path
 
+from .common import MockResource
+
 
 class TestAppHelpers:
     def test_split_path_root(self):
@@ -83,4 +85,51 @@ class TestClientDisconnect:
 
         assert sent[0]["status"] == HTTPStatus.BAD_REQUEST
         assert "Client disconnected during PROPFIND /folder/" in caplog.text
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+    @pytest.mark.asyncio
+    async def test_hang_up_during_put_is_logged_as_an_aborted_upload(self, caplog):
+        class ReadingResource(MockResource):
+            async def overwrite(self, content, size):
+                async for _ in content:
+                    pass
+
+        async def get_member(path):
+            return ReadingResource(path)
+
+        app = create_app(get_member)
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "PUT",
+            "scheme": "http",
+            "path": "/big.bin",
+            "raw_path": b"/big.bin",
+            "root_path": "",
+            "query_string": b"",
+            "headers": [(b"content-length", b"100")],
+            "client": ("127.0.0.1", 1234),
+            "server": ("127.0.0.1", 80),
+        }
+        chunks = [
+            {"type": "http.request", "body": b"x" * 40, "more_body": True},
+            {"type": "http.disconnect"},
+        ]
+
+        async def receive():
+            return chunks.pop(0) if len(chunks) > 1 else chunks[0]
+
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        with caplog.at_level(logging.DEBUG, logger="asgidav.app"):
+            await app(scope, receive, send)
+
+        assert sent[0]["status"] == HTTPStatus.BAD_REQUEST
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "Client disconnected during PUT /big.bin" in warnings[0].message
         assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
