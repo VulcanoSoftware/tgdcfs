@@ -113,6 +113,11 @@ class MessageBroker:
                     msg.message_id: msg for msg in messages if msg is not None
                 }
 
+                cache = channel_cache(self.private_file_channel).id
+                for msg in messages:
+                    if msg is not None:
+                        cache[msg.message_id] = msg
+
                 for r in requests:
                     if not r.future.done():
                         r.future.set_result(

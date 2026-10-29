@@ -28,7 +28,16 @@ class Folder(_Folder):
     async def display_name(self) -> str:
         return self.__folder.name
 
+    async def _prefetch_descriptors(self) -> None:
+        files = self.__folder.find_files()
+        if not files:
+            return
+        mids = [f.message_id for f in files if f.message_id > 0]
+        if mids:
+            await self.__client.store.get_messages(mids)
+
     async def member_names(self):
+        await self._prefetch_descriptors()
         return self.__sub_folders.union(self.__sub_files)
 
     async def member(self, path: str):
@@ -37,7 +46,8 @@ class Folder(_Folder):
             return self
 
         if path_parts[0] in self.__sub_files:
-            return Resource(self._sub_path(path_parts[0]), self.__client)
+            fr = self.__folder.find_file(path_parts[0])
+            return Resource(self._sub_path(path_parts[0]), self.__client, fr=fr)
 
         if path_parts[0] in self.__sub_folders:
             if len(path_parts) > 1:

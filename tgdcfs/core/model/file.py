@@ -223,13 +223,13 @@ class TGFSFileVersion:
                 message_ids = []
         pending = bool(data.get("pending"))
         plaintext_size = data.get("plaintextSize")
+        size_val = data.get("size")
         return TGFSFileVersion(
             id=data["id"],
             updated_at=updated_at,
-            # A pending version's size is only known from the descriptor.
             _size=(
-                int(data.get("size", INVALID_FILE_SIZE))
-                if pending
+                int(size_val)
+                if size_val is not None
                 else INVALID_FILE_SIZE
             ),
             pending=pending,
