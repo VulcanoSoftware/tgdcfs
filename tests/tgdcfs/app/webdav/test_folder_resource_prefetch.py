@@ -26,9 +26,23 @@ class TestFolderResourcePrefetch:
 
         folder = Folder("/", mock_client)
 
+        mock_fd1 = MagicMock()
+        mock_fv1 = MagicMock()
+        mock_fv1.message_ids = [201]
+        mock_fd1.get_latest_version.return_value = mock_fv1
+
+        mock_fd2 = MagicMock()
+        mock_fv2 = MagicMock()
+        mock_fv2.message_ids = [202]
+        mock_fd2.get_latest_version.return_value = mock_fv2
+
+        mock_client.file_api.desc = AsyncMock(side_effect=[mock_fd1, mock_fd2])
+
         names = await folder.member_names()
         assert set(names) == {"file1.txt", "file2.txt"}
-        mock_client.store.get_messages.assert_called_once_with([101, 102])
+        assert mock_client.store.get_messages.call_count == 2
+        mock_client.store.get_messages.assert_any_call([101, 102])
+        mock_client.store.get_messages.assert_any_call([201, 202])
 
         resource = await folder.member("file1.txt")
         assert isinstance(resource, Resource)

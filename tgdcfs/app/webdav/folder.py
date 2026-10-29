@@ -1,3 +1,4 @@
+from contextlib import suppress
 from typing import Mapping, Optional, Tuple
 
 from asgidav.folder import Folder as _Folder
@@ -35,6 +36,17 @@ class Folder(_Folder):
         mids = [f.message_id for f in files if f.message_id > 0]
         if mids:
             await self.__client.store.get_messages(mids)
+
+            content_mids: list[int] = []
+            for fr in files:
+                with suppress(Exception):
+                    fd = await self.__client.file_api.desc(fr, validate=False)
+                    if fd:
+                        fv = fd.get_latest_version()
+                        if fv and fv.message_ids:
+                            content_mids.extend(m for m in fv.message_ids if m > 0)
+            if content_mids:
+                await self.__client.store.get_messages(content_mids)
 
     async def member_names(self):
         await self._prefetch_descriptors()
