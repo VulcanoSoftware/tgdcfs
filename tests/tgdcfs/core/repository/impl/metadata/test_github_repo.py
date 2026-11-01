@@ -1292,6 +1292,22 @@ class TestStatsFiles:
         repo.get_git_blob.assert_called_once_with("x")
 
     @pytest.mark.asyncio
+    async def test_a_file_changed_before_the_read_keeps_no_old_stat(
+        self, repository, repo
+    ):
+        root = self.load(
+            repository, repo, [("a.txt.10", "s1"), (".tgdcfsstats.json", "x")]
+        )
+        repo.get_git_blob.return_value = self.blob(
+            {"10": {"size": 5, "createdAt": 1, "modifiedAt": 2}}
+        )
+        root.files[0].stat_epoch = 1  # overwritten since the start
+
+        await repository.load_stats(root)
+
+        assert root.files[0].stat is None
+
+    @pytest.mark.asyncio
     async def test_an_unreadable_stats_file_is_reported(self, repository, repo):
         root = self.load(
             repository, repo, [("a.txt.10", "s1"), (".tgdcfsstats.json", "x")]

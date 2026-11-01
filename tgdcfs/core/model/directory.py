@@ -351,8 +351,10 @@ class TGFSDirectory:
         moved = to.create_file_ref(name, fr.message_id)
         moved.mirrors = dict(fr.mirrors)
         moved.store = fr.store
-        # Same descriptor, same content: what a listing shows moves along.
+        # Same descriptor, same content: what a listing shows moves along,
+        # and so does whether it changed since the start.
         moved.stat = fr.stat
+        moved.stat_epoch = fr.stat_epoch
         try:
             self.delete_file_ref(fr)
         except Exception:

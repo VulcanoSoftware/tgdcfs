@@ -861,6 +861,9 @@ Keep in mind:
   keep showing the old one. Instances that only read are fine; tgfs ignores
   the extra fields. tgfs logs an "Invalid name format" warning for each
   `.tgdcfsstats.json` it finds in a `github_repo` metadata repository.
+* **The metadata grows** by about 70 bytes per file. With
+  `pinned_message` on a Discord primary the whole `metadata.json` has to
+  fit one attachment; a tree of very many files can outgrow it there.
 * **Sizes and dates go into the metadata store.** With encryption on, they
   are the plaintext sizes; for a public `github_repo` repository that is
   more than the file names alone give away.

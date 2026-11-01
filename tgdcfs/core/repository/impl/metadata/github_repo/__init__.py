@@ -109,7 +109,9 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
             )
             return False
         for fr in directory.find_files():
-            if fr.stat is None:
+            # A ref that changed since the start has a stored entry from
+            # before the change; it stays empty and is read again.
+            if fr.stat is None and fr.stat_epoch == 0:
                 fr.stat = FileStat.from_dict(entries.get(str(fr.message_id)))
         directory.stats_loaded = True
         return True
