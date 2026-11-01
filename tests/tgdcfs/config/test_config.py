@@ -262,13 +262,19 @@ class TestCacheConfig:
 class TestListingConfig:
     def test_defaults_when_absent(self):
         listing = ListingConfig.from_dict(None)
+        assert listing.stat_in_metadata is False
         assert listing.validate_on_list is True
         assert listing.message_cache_size == 1024
 
     def test_values_are_read(self):
         listing = ListingConfig.from_dict(
-            {"validate_on_list": False, "message_cache_size": 50000}
+            {
+                "stat_in_metadata": True,
+                "validate_on_list": False,
+                "message_cache_size": 50000,
+            }
         )
+        assert listing.stat_in_metadata is True
         assert listing.validate_on_list is False
         assert listing.message_cache_size == 50000
 

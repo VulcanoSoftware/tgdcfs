@@ -328,6 +328,11 @@ class TGFSFileDesc:
     created_at: datetime.datetime = field(default_factory=datetime.datetime.now)
     versions: dict[str, TGFSFileVersion] = field(default_factory=dict)
 
+    # False when the descriptor could not be read, or not checked against
+    # the primary store, and what is served is a stand-in. Not serialized;
+    # a stat derived from such a descriptor is never stored.
+    complete: bool = field(default=True, compare=False, repr=False)
+
     @property
     def updated_at_timestamp(self) -> int:
         if not self.versions or self.latest_version_id == INVALID_VERSION_ID:

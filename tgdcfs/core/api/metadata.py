@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from typing import AsyncIterator, Iterable
 
 from tgdcfs.core.model import TGFSDirectory, TGFSMetadata
 from tgdcfs.core.repository.interface import IMetaDataRepository
@@ -44,3 +44,20 @@ class MetaDataApi:
 
     def get_root_directory(self) -> TGFSDirectory:
         return self.__metadata_repo.root()
+
+    # -- file stats (``listing.stat_in_metadata``) -------------------------
+
+    @property
+    def push_writes_stats(self) -> bool:
+        return self.__metadata_repo.push_writes_stats
+
+    async def load_stats(self, directory: TGFSDirectory) -> bool:
+        return await self.__metadata_repo.load_stats(directory)
+
+    def stats_stored(self, directory: TGFSDirectory) -> bool:
+        return self.__metadata_repo.stats_stored(directory)
+
+    async def save_stats(
+        self, directories: Iterable[TGFSDirectory], keep: bool
+    ) -> None:
+        await self.__metadata_repo.save_stats(directories, keep)

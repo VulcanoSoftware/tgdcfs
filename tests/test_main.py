@@ -164,6 +164,11 @@ class TestMain:
         mock_config.replication_queue_file = None
 
         mock_clients = mocker.Mock()
+        stats = mocker.Mock()
+        stats.close = mocker.AsyncMock()
+        mock_clients.values.return_value = [
+            mocker.Mock(file_api=mocker.Mock(stats=stats))
+        ]
         mock_app = mocker.Mock()
 
         mock_get_config.return_value = mock_config
@@ -181,3 +186,4 @@ class TestMain:
         mock_create_app.assert_called_once()
         assert mock_create_app.call_args.args[:2] == (mock_clients, mock_config)
         mock_run_server.assert_called_once_with(mock_app, "0.0.0.0", 9000, "TGDCFS")
+        stats.close.assert_awaited_once()

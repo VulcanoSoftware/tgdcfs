@@ -11,6 +11,7 @@ from tgdcfs.crypto.path_names import encrypt_path_name
 from tgdcfs.utils.time import FIRST_DAY_OF_EPOCH
 
 from .dir_timestamps import DirTimestampStore
+from .stats_file import STATS_FILE_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,10 @@ class GithubDirectory(TGFSDirectory):
             else ghc.name_key is not None
         )
         self._ts_initialised = True
+        # Blob sha of this folder's stats file in the repo, ``None`` when
+        # there is none; whether its content has been put on the file refs.
+        self.stats_sha: Optional[str] = None
+        self.stats_loaded = False
 
     # --- dates ---------------------------------------------------------------
     #
@@ -118,6 +123,20 @@ class GithubDirectory(TGFSDirectory):
         if self._modified_pending:
             self._modified_at = modified
             self._modified_pending = False
+
+    def is_attached(self) -> bool:
+        """Whether this folder is still part of the tree (not deleted)."""
+        node: TGFSDirectory = self
+        while node.parent is not None:
+            if not any(child is node for child in node.parent.children):
+                return False
+            node = node.parent
+        return True
+
+    @property
+    def stats_path(self) -> str:
+        """Repo path of this folder's stats file."""
+        return self.join_path(self._github_path, STATS_FILE_NAME)
 
     @staticmethod
     def join_path(*args: str) -> str:

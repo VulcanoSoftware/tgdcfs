@@ -153,6 +153,10 @@ async def main():
     finally:
         for worker in workers:
             await worker.stop()
+        # Size and dates read by listings since the last write
+        # (``listing.stat_in_metadata``).
+        for client in clients.values():
+            await client.file_api.stats.close()
         if sweeper is not None:
             await sweeper.stop()
         if sftp_acceptor:

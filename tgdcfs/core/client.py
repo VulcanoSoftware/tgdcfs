@@ -207,7 +207,10 @@ class Client:
             on_written=on_written,
             written_gaps_only=tee,
             stat_api=FileStatApi(
-                fd_api, validate=config.tgdcfs.listing.validate_on_list
+                fd_api,
+                validate=config.tgdcfs.listing.validate_on_list,
+                metadata_api=metadata_api,
+                persist=config.tgdcfs.listing.stat_in_metadata,
             ),
         )
         dir_api = DirectoryApi(metadata_api, file_api, store)

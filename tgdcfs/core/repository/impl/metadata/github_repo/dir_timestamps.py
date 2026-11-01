@@ -9,6 +9,8 @@ from typing import Iterable, Optional, Tuple
 
 from github.Repository import Repository
 
+from .stats_file import is_stats_commit, is_stats_file
+
 logger = logging.getLogger(__name__)
 
 CACHE_VERSION = 1
@@ -26,6 +28,10 @@ WORKER_COUNT = 2
 # Write the cache out every so many resolutions so a restart mid-warmup keeps
 # what was already paid for.
 SAVE_EVERY = 25
+
+# How many stats commits in a row ``_latest_commit_date`` looks past
+# before it settles for the newest commit; one page of the commit list.
+STATS_COMMIT_SCAN_LIMIT = 30
 
 Timestamps = Tuple[datetime.datetime, datetime.datetime]
 
@@ -172,7 +178,9 @@ class DirTimestampStore:
         stale: set[str] = set()
         for changed in files:
             for name in (changed.filename, getattr(changed, "previous_filename", None)):
-                if name:
+                # A stats file changes no folder's dates, see
+                # ``_latest_commit_date``.
+                if name and not is_stats_file(name):
                     stale.update(_ancestor_dirs(name))
 
         kept = {path: ts for path, ts in entries.items() if path not in stale}
@@ -254,9 +262,24 @@ class DirTimestampStore:
             self.save()
 
     def _latest_commit_date(self, path: str) -> Optional[datetime.datetime]:
+        """Date of the newest commit under ``path`` that changed a file.
+
+        Commits that only wrote stats files (``listing.stat_in_metadata``)
+        are skipped: storing what a listing read is no change to the
+        folder, and a folder date that moves on every listing would make
+        clients and media servers rescan it.
+        """
         try:
             commits = self._repo.get_commits(sha=self._branch, path=path)
-            return commits[0].commit.committer.date
+            newest = None
+            for seen, commit in enumerate(commits):
+                if newest is None:
+                    newest = commit.commit.committer.date
+                if not is_stats_commit(commit.commit.message):
+                    return commit.commit.committer.date
+                if seen + 1 >= STATS_COMMIT_SCAN_LIMIT:
+                    break
+            return newest
         except Exception as ex:
             # Best-effort enrichment only: missing history, an API error or any
             # unexpected response must never propagate.

@@ -210,6 +210,12 @@ tgdcfs:
   # Optional tuning for folders with many files. See the README, "Large
   # folders".
   #
+  # ``stat_in_metadata: true`` keeps size and dates of every file in the
+  # metadata (``metadata.json``, or one ``.tgdcfsstats.json`` per folder
+  # with ``github_repo``), so a listing reads no descriptor at all. Missing
+  # values are read once and written back. Only turn it on when every
+  # instance that writes to this file system supports it.
+  #
   # ``validate_on_list: false`` lists files without checking that their
   # content messages still exist (checked on read instead), which halves
   # the store reads of a listing. ``message_cache_size`` is the number of
@@ -217,6 +223,7 @@ tgdcfs:
   # your largest folder so a second listing is served from memory.
   # ---------------------------------------------------------------------------
   # listing:
+  #   stat_in_metadata: false
   #   validate_on_list: true
   #   message_cache_size: 1024
 

@@ -4,7 +4,7 @@ import time
 import pytest
 from unittest.mock import Mock
 
-from tgdcfs.core.model import TGFSFileRefSerialized
+from tgdcfs.core.model import FileStat, TGFSFileRefSerialized
 from tgdcfs.core.model.directory import FileRefList, TGFSDirectory, TGFSFileRef
 from tgdcfs.errors import (
     FileOrDirectoryAlreadyExists,
@@ -820,3 +820,40 @@ class TestFileIndex:
         for i in range(10_000):
             assert d.find_file(f"file-{i}.bin").message_id == i + 1
         assert time.monotonic() - started < 5.0
+
+
+class TestFileRefStat:
+    def test_the_stat_round_trips_through_the_tree(self):
+        root = TGFSDirectory.root_dir()
+        fr = root.create_file_ref("a.txt", fd_message_id=10)
+        fr.stat = FileStat(size=5, created_at=1, modified_at=2)
+
+        loaded = TGFSDirectory.from_dict(root.to_dict())
+
+        assert loaded.files[0].stat == FileStat(size=5, created_at=1, modified_at=2)
+
+    def test_a_ref_without_stat_is_written_as_before(self):
+        root = TGFSDirectory.root_dir()
+        root.create_file_ref("a.txt", fd_message_id=10)
+
+        assert "stat" not in root.to_dict()["files"][0]
+
+    @pytest.mark.parametrize(
+        "stat",
+        [None, "x", {"size": 1}, {"size": "1", "createdAt": 1, "modifiedAt": 1}],
+    )
+    def test_a_malformed_stat_is_ignored(self, stat):
+        data = TGFSDirectory.root_dir().to_dict()
+        data["files"] = [{"type": "FR", "messageId": 10, "name": "a", "stat": stat}]
+
+        assert TGFSDirectory.from_dict(data).files[0].stat is None
+
+    def test_a_move_keeps_the_stat(self):
+        root = TGFSDirectory.root_dir()
+        dest = root.create_dir("dest")
+        fr = root.create_file_ref("a.txt", fd_message_id=10)
+        fr.stat = FileStat(size=5, created_at=1, modified_at=2)
+
+        moved = root.relocate_file_ref(fr, dest, "b.txt")
+
+        assert moved.stat == fr.stat

@@ -591,8 +591,17 @@ class ListingConfig:
     messages still exist while listing; the check then happens on the
     first read. ``message_cache_size`` is the number of messages kept in
     memory per channel.
+
+    ``stat_in_metadata`` keeps size and dates next to the file refs in the
+    metadata (in ``metadata.json`` for ``pinned_message``, in one
+    ``.tgdcfsstats.json`` per folder for ``github_repo``); a listing then
+    reads no descriptor at all. A value missing there is read from the
+    descriptor on the first listing and written back. Only safe when every
+    instance that writes to the file system supports it: one that does not
+    leaves the stored value unchanged when it overwrites a file.
     """
 
+    stat_in_metadata: bool = False
     validate_on_list: bool = True
     message_cache_size: int = 1024
 
@@ -607,6 +616,7 @@ class ListingConfig:
                 f"listing.message_cache_size must be at least 1, got {size}"
             )
         return cls(
+            stat_in_metadata=bool(data.get("stat_in_metadata", False)),
             validate_on_list=bool(data.get("validate_on_list", True)),
             message_cache_size=size,
         )

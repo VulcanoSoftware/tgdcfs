@@ -28,6 +28,14 @@ the fact on the commits that shipped them.
   `message_cache_size` (default `1024`) sets how many messages are kept in
   memory per channel; it used to be fixed at 1024, so a folder with more
   files was read from the store again on every listing.
+- `tgdcfs.listing.stat_in_metadata` (default `false`) keeps each file's
+  size and dates in the metadata, so a listing reads no descriptor at all
+  and a folder of 10,000 files opens without 20,000 store reads. Missing
+  values are read on the first listing and written back in the
+  background, also when the client gives up on the listing halfway. With
+  `pinned_message` they are a `stat` field in `metadata.json`, with
+  `github_repo` one `.tgdcfsstats.json` per folder. Only turn it on when
+  every instance that writes to the file system supports it.
 
 ### Changed
 

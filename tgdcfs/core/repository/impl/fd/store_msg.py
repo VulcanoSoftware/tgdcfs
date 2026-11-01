@@ -201,6 +201,7 @@ class StoreFDRepository(IFDRepository):
             )
             self._mirror_group.mark_primary_dead()
             file_messages = [None] * len(all_ids)
+            fd.complete = False
 
         message_map = {msg.message_id: msg for msg in file_messages if msg}
 
@@ -288,7 +289,11 @@ class StoreFDRepository(IFDRepository):
                     candidates, key=lambda v: v.updated_at_timestamp
                 ).id
 
-        return fd if has_valid_version else TGFSFileDesc.empty(fd.name)
+        if has_valid_version:
+            return fd
+        empty = TGFSFileDesc.empty(fd.name)
+        empty.complete = fd.complete
+        return empty
 
     async def _get_fd_text(self, fr: TGFSFileRef) -> Optional[str]:
         """Read the FD JSON, falling back to mirror copies if needed."""
@@ -362,7 +367,9 @@ class StoreFDRepository(IFDRepository):
             logging.error(
                 f"File descriptor (message_id: {fr.message_id}) for {fr.name} not found"
             )
-            return TGFSFileDesc.empty(fr.name)
+            missing = TGFSFileDesc.empty(fr.name)
+            missing.complete = False
+            return missing
 
         fd = TGFSFileDesc.from_dict(json.loads(text), name=fr.name)
         for version in fd.get_versions():
