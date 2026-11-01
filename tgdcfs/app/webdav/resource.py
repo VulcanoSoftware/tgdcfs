@@ -4,6 +4,7 @@ import os.path
 from typing import Optional
 
 from asgidav.resource import Resource as _Resource
+from asgidav.resource import ResourceProperties
 from tgdcfs.app.fs_cache import gfc
 from tgdcfs.app.utils import strip_webdav_prefix
 from tgdcfs.core import Client, Ops
@@ -53,6 +54,21 @@ class Resource(_Resource):
 
     async def display_name(self) -> str:
         return self.__fr.name
+
+    async def get_properties(self) -> ResourceProperties:
+        # A listing asks this of every file in the folder. It goes through
+        # the stat API, which can skip the content check or answer from
+        # the metadata (``listing`` in the config); GET and HEAD keep
+        # reading the descriptor itself.
+        stat = await self.__client.file_api.stats.get(self.__fr)
+        return ResourceProperties(
+            getlastmodified=self.unixdate2rfc1123(stat.modified_at),
+            creationdate=self.unixdate2iso8601(stat.created_at),
+            displayname=self.__fr.name,
+            resourcetype=self.resource_type.value,
+            getcontenttype=await self.content_type(),
+            getcontentlength=str(stat.size),
+        )
 
     async def get_content(self, begin: int = 0, end: int = -1) -> FileContent:
         return await self.__ops.download(

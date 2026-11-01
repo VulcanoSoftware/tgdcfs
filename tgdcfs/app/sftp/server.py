@@ -46,7 +46,6 @@ from tgdcfs.errors import (
     InvalidName,
     InvalidPath,
 )
-from tgdcfs.utils.time import ts
 
 from .attrs import dir_attrs, file_attrs, root_attrs
 from .handles import ReadHandle, WriteHandle
@@ -236,15 +235,15 @@ class TGFSSFTPServer(asyncssh.SFTPServer):
 
     async def _file_attrs(self, resolved: ResolvedPath) -> SFTPAttrs:
         client = self._client(resolved.client_name)
-        fd = await Ops(client).desc(resolved.relative)
-        fv = fd.get_latest_version()
-        # The content repository reports the logical size: with encryption on
-        # that is the plaintext length, which is what the client will get.
-        size = await client.fc_repo.content_length(fv)
+        fr = Ops(client).stat_file(resolved.relative)
+        # The stat API reports the logical size: with encryption on that is
+        # the plaintext length, which is what the client will get. It is the
+        # same answer a WebDAV listing gives, configured by ``listing``.
+        stat = await client.file_api.stats.get(fr)
         return file_attrs(
-            size=size,
-            created_ms=ts(fd.created_at),
-            modified_ms=fv.updated_at_timestamp,
+            size=stat.size,
+            created_ms=stat.created_at,
+            modified_ms=stat.modified_at,
             readonly=self._readonly,
         )
 

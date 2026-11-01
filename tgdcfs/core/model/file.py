@@ -110,6 +110,12 @@ class TGFSFileVersion:
     # changes on every push and would only pollute the cache.
     cacheable: bool = field(default=True, compare=False, repr=False)
 
+    # The size the descriptor recorded when the version was written. The
+    # live size comes from the part sizes, which only a check of the
+    # content messages fills in; a listing that skips that check
+    # (``listing.validate_on_list: false``) reports this one instead.
+    recorded_size: int = field(default=INVALID_FILE_SIZE, compare=False, repr=False)
+
     @property
     def updated_at_timestamp(self) -> int:
         return ts(self.updated_at)
@@ -237,6 +243,7 @@ class TGFSFileVersion:
                 for key, replica in (data.get("replicas") or {}).items()
             },
             store=(normalize_store_key(data["store"]) if data.get("store") else None),
+            recorded_size=int(data.get("size", INVALID_FILE_SIZE)),
         )
 
     def set_invalid(self):

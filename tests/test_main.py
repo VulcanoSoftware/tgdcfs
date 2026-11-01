@@ -160,6 +160,7 @@ class TestMain:
         mock_config.tgdcfs.server.host = "0.0.0.0"
         mock_config.tgdcfs.server.port = 9000
         mock_config.tgdcfs.cache.enabled = False
+        mock_config.tgdcfs.listing.message_cache_size = 1024
         mock_config.replication_queue_file = None
 
         mock_clients = mocker.Mock()

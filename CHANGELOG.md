@@ -21,8 +21,18 @@ the fact on the commits that shipped them.
 - This changelog, SemVer release tags and GitHub releases. A pushed tag
   `vX.Y.Z` publishes the release notes from this file and adds the version
   tags to the Docker images of that commit.
+- New config block `tgdcfs.listing` for folders with many files (see
+  "Large folders" in the README). `validate_on_list` (default `true`) can
+  turn off the check of every file's content messages during a listing,
+  which halves the store reads of a WebDAV `PROPFIND` or an SFTP `ls`.
+  `message_cache_size` (default `1024`) sets how many messages are kept in
+  memory per channel; it used to be fixed at 1024, so a folder with more
+  files was read from the store again on every listing.
 
 ### Changed
+
+- WebDAV listings report a file's creation date as the date of its oldest
+  version. It used to be the time of the listing.
 
 - Cache evictions are logged as one line per run, `Cache: evicted N entries
   (size) to make room` or `… for the disk headroom`, instead of one line per

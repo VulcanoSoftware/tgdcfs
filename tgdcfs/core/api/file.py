@@ -27,6 +27,7 @@ from tgdcfs.reqres import (
 
 from .file_desc import FileDescApi
 from .metadata import MetaDataApi
+from .stat import FileStatApi
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ class FileApi:
         inline_mirroring: bool = True,
         on_written: Optional[Callable[[TGFSFileRef], Awaitable[None]]] = None,
         written_gaps_only: bool = False,
+        stat_api: Optional[FileStatApi] = None,
     ):
         self._metadata_api = metadata_api
         self._file_desc_api = file_desc_api
@@ -65,6 +67,8 @@ class FileApi:
         # copy of (a mirror that failed mid-stream, a server-side copy
         # that was refused, a copy of a file made without a stream).
         self._written_gaps_only = written_gaps_only
+        # What listings show of a file; see ``FileStatApi``.
+        self.stats = stat_api or FileStatApi(file_desc_api)
 
     async def _written(self, fr: TGFSFileRef, fd: Optional[TGFSFileDesc]) -> None:
         if self._on_written is None:

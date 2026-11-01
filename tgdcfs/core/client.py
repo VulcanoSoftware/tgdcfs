@@ -8,7 +8,13 @@ from tgdcfs.config import (
     MetadataType,
     StoreConfig,
 )
-from tgdcfs.core.api import DirectoryApi, FileApi, FileDescApi, MetaDataApi
+from tgdcfs.core.api import (
+    DirectoryApi,
+    FileApi,
+    FileDescApi,
+    FileStatApi,
+    MetaDataApi,
+)
 from tgdcfs.core.local_cache import LocalCache
 from tgdcfs.core.mirror import MirrorGroup, MirrorStore
 from tgdcfs.core.model import TGFSFileRef
@@ -200,6 +206,9 @@ class Client:
             inline_mirroring=inline,
             on_written=on_written,
             written_gaps_only=tee,
+            stat_api=FileStatApi(
+                fd_api, validate=config.tgdcfs.listing.validate_on_list
+            ),
         )
         dir_api = DirectoryApi(metadata_api, file_api, store)
 

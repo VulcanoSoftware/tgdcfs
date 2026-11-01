@@ -7,6 +7,7 @@ from .serialized import (
     TGFSFileRefSerialized,
     TGFSFileVersionSerialized,
 )
+from .stat import FileStat, FileStatSerialized
 
 __all__ = [
     "TGFSMetadata",
@@ -19,4 +20,6 @@ __all__ = [
     "TGFSFileRefSerialized",
     "TGFSDirectorySerialized",
     "EMPTY_FILE_MESSAGE",
+    "FileStat",
+    "FileStatSerialized",
 ]

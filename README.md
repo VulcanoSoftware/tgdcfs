@@ -818,6 +818,37 @@ raising anything else.
 `scripts/measure_transfer.py` shows what the piece-level parallelism is
 worth against a simulated link, without needing a channel.
 
+## Large folders
+
+A folder listing (WebDAV `PROPFIND`, SFTP `ls`) shows the size and dates of
+every file. The directory tree in the metadata only knows the names; size
+and dates are in each file's descriptor message in the store. Listing a
+folder of 10,000 files therefore reads 10,000 descriptors and checks that
+the content messages of each one still exist: about 20,000 messages, which
+on Telegram means hundreds of requests and on Discord one request per
+message. Clients give up long before that.
+
+The optional `listing` block makes this cheaper. Without it nothing changes.
+
+```yaml
+tgdcfs:
+  listing:
+    validate_on_list: true     # false: check the content messages on read only
+    message_cache_size: 1024   # messages kept in memory per channel
+```
+
+**`validate_on_list: false`** skips the check of the content messages while
+listing and halves the reads. The sizes are the ones the descriptor recorded
+when the file was written. A file whose messages were deleted in the channel
+by hand is then listed with its old size and fails on download, instead of
+showing up with 0 bytes.
+
+**`message_cache_size`** is how many messages are kept in memory per
+channel (default 1024). A folder with more files than that evicts its own
+descriptors during the listing, so the next listing reads all of them
+again. Descriptor messages are small; 50,000 entries cost a few tens of
+megabytes.
+
 ## Web frontend
 
 The Next.js app in `tgdcfs-gh-pages/` is published at

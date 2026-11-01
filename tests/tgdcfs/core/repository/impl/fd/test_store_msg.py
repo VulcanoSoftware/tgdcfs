@@ -711,3 +711,80 @@ class TestEdgeCases:
         assert version1.is_valid()
         assert len(version1.part_sizes) == 100
         assert all(size == 1000 for size in version1.part_sizes)
+
+
+class TestGetWithoutValidation:
+    """``validate=False``: the listing path of ``listing.validate_on_list``."""
+
+    @staticmethod
+    def _descriptor(*versions):
+        message = Mock()
+        message.text = json.dumps({"type": "F", "versions": list(versions)})
+        return message
+
+    @staticmethod
+    def _version(vid, day, message_ids, size, **extra):
+        return {
+            "type": "FV",
+            "id": vid,
+            "updatedAt": int(datetime.datetime(2024, 1, day).timestamp() * 1000),
+            "messageIds": message_ids,
+            "size": size,
+            **extra,
+        }
+
+    @pytest.mark.asyncio
+    async def test_reads_only_the_descriptor(
+        self, repository, mock_message_api, sample_file_ref
+    ):
+        mock_message_api.get_messages.return_value = [
+            self._descriptor(self._version("v1", 1, [12345, 12346], 1000))
+        ]
+
+        fd = await repository.get(sample_file_ref, validate=False)
+
+        mock_message_api.get_messages.assert_awaited_once_with([999])
+        assert fd.get_latest_version().id == "v1"
+        assert fd.get_latest_version().size == 1000
+
+    @pytest.mark.asyncio
+    async def test_serves_the_newest_version(
+        self, repository, mock_message_api, sample_file_ref
+    ):
+        mock_message_api.get_messages.return_value = [
+            self._descriptor(
+                self._version("old", 1, [1], 10), self._version("new", 2, [2], 20)
+            )
+        ]
+
+        fd = await repository.get(sample_file_ref, validate=False)
+
+        assert fd.get_latest_version().id == "new"
+        assert fd.get_latest_version().size == 20
+
+    @pytest.mark.asyncio
+    async def test_a_foreign_pending_version_is_skipped(
+        self, repository, mock_message_api, sample_file_ref
+    ):
+        mock_message_api.get_messages.return_value = [
+            self._descriptor(
+                self._version("old", 1, [1], 10),
+                self._version("pending", 2, [], 99, pending=True),
+            )
+        ]
+
+        fd = await repository.get(sample_file_ref, validate=False)
+
+        assert fd.get_latest_version().id == "old"
+
+    @pytest.mark.asyncio
+    async def test_a_descriptor_without_content_is_empty(
+        self, repository, mock_message_api, sample_file_ref
+    ):
+        mock_message_api.get_messages.return_value = [
+            self._descriptor(self._version("v1", 1, [], 0))
+        ]
+
+        fd = await repository.get(sample_file_ref, validate=False)
+
+        assert fd.versions == {}

@@ -262,6 +262,11 @@ class StoreFDRepository(IFDRepository):
                     # Found a valid version, no need to check further
                     break
 
+        return self._point_at_readable(fd, has_valid_version)
+
+    def _point_at_readable(
+        self, fd: TGFSFileDesc, has_valid_version: bool
+    ) -> TGFSFileDesc:
         # A pending version is readable on the instance whose cache holds
         # it; elsewhere it counts as invalid, like a version whose parts
         # are gone. The version served is the latest one, so when that one
@@ -325,8 +330,28 @@ class StoreFDRepository(IFDRepository):
                 return mirror_message.text
         return None
 
+    def _trust_recorded(self, fd: TGFSFileDesc) -> TGFSFileDesc:
+        """Serve ``fd`` as the descriptor records it, without checking that
+        the content messages still exist.
+
+        For listings with ``listing.validate_on_list: false``: the sizes
+        are the ones recorded when each version was written, and a version
+        whose parts were deleted by hand only shows up as broken on read.
+        """
+        has_valid_version = False
+        for version in fd.get_versions():
+            if not version.is_valid():
+                continue
+            has_valid_version = True
+            if version.size == INVALID_FILE_SIZE and version.recorded_size >= 0:
+                version._size = version.recorded_size
+        return self._point_at_readable(fd, has_valid_version)
+
     async def get(
-        self, fr: TGFSFileRef, include_all_versions: bool = False
+        self,
+        fr: TGFSFileRef,
+        include_all_versions: bool = False,
+        validate: bool = True,
     ) -> TGFSFileDesc:
         # After a promotion the ref may still describe the former primary;
         # re-express it relative to this store before touching anything.
@@ -342,4 +367,6 @@ class StoreFDRepository(IFDRepository):
         fd = TGFSFileDesc.from_dict(json.loads(text), name=fr.name)
         for version in fd.get_versions():
             version.relocate(self.key)
+        if not validate:
+            return self._trust_recorded(fd)
         return await self._validate_fv(fd, include_all_versions)

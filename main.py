@@ -26,6 +26,7 @@ from tgdcfs.core import Client, Clients
 from tgdcfs.core.client import StoreFactory
 from tgdcfs.core.local_cache import CacheSweeper, LocalCache
 from tgdcfs.core.replication import ReplicationQueue, ReplicationWorker
+from tgdcfs.utils.message_cache import set_message_cache_size
 
 
 async def create_store_factory(config: Config) -> StoreFactory:
@@ -126,6 +127,8 @@ async def run_server(app, host: str, port: int, name: str):
 async def main():
     logger = logging.getLogger(__name__)
     config = get_config()
+    # Before the first store exists, so every channel starts at this size.
+    set_message_cache_size(config.tgdcfs.listing.message_cache_size)
 
     replication = ReplicationQueue(config.replication_queue_file)
     cache = create_cache(config)

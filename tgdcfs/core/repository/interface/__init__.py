@@ -88,8 +88,13 @@ class IFDRepository(metaclass=ABCMeta):
 
     @abstractmethod
     async def get(
-        self, fr: TGFSFileRef, include_all_versions: bool = False
+        self,
+        fr: TGFSFileRef,
+        include_all_versions: bool = False,
+        validate: bool = True,
     ) -> TGFSFileDesc:
+        """The descriptor of ``fr``. ``validate=False`` skips the check that
+        its content messages still exist and trusts the recorded sizes."""
         pass
 
 
