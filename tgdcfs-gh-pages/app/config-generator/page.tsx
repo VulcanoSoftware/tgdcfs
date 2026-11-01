@@ -43,6 +43,8 @@ import {
   ConfigData,
   DiscordConfig,
   FilesystemConfig,
+  LISTING_DEFAULTS,
+  ListingConfig,
   SftpConfig,
   StoreConfig,
   SyncMode,
@@ -75,6 +77,7 @@ type ConfigUpdatePaths = {
   "tgdcfs.transfer": TransferConfig;
   "tgdcfs.encryption": EncryptionConfig;
   "tgdcfs.cache": CacheConfig;
+  "tgdcfs.listing": ListingConfig;
 };
 
 const generateRandomSecret = (): string => {
@@ -142,6 +145,8 @@ export default function ConfigGenerator() {
         newConfig.tgdcfs.encryption = value as EncryptionConfig;
       } else if (path === "tgdcfs.cache") {
         newConfig.tgdcfs.cache = value as CacheConfig;
+      } else if (path === "tgdcfs.listing") {
+        newConfig.tgdcfs.listing = value as ListingConfig;
       }
 
       setConfig(newConfig);
@@ -613,6 +618,20 @@ export default function ConfigGenerator() {
             }
           });
           return { cache: block };
+        })(),
+        ...(() => {
+          // Only what differs from the loader's defaults; no block at all
+          // when nothing does.
+          const listing = config.tgdcfs.listing;
+          const block: Partial<ListingConfig> = {};
+          (Object.keys(LISTING_DEFAULTS) as (keyof ListingConfig)[]).forEach(
+            (key) => {
+              if (listing[key] !== LISTING_DEFAULTS[key]) {
+                (block as Record<string, unknown>)[key] = listing[key];
+              }
+            }
+          );
+          return Object.keys(block).length ? { listing: block } : {};
         })(),
         encryption: (() => {
           const enc = config.tgdcfs.encryption;
@@ -1481,6 +1500,63 @@ export default function ConfigGenerator() {
                   />
                 </>
               )}
+            </FormSection>
+
+            <FormSection title="Large Folders (Optional)">
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                A folder listing shows the size and dates of every file, and
+                those live in each file&apos;s descriptor message, not in the
+                directory tree. Without these settings a folder of 10,000
+                files costs about 20,000 store reads per listing.
+              </Typography>
+              <FormControlLabel
+                label="Keep size and dates in the metadata (every instance that writes must support it)"
+                control={
+                  <Checkbox
+                    checked={config.tgdcfs.listing.stat_in_metadata}
+                    onChange={(e) =>
+                      updateConfig("tgdcfs.listing", {
+                        ...config.tgdcfs.listing,
+                        stat_in_metadata: e.target.checked,
+                      })
+                    }
+                  />
+                }
+              />
+              <FormControlLabel
+                label="Check the content messages while listing (off: only on read)"
+                control={
+                  <Checkbox
+                    checked={config.tgdcfs.listing.validate_on_list}
+                    onChange={(e) =>
+                      updateConfig("tgdcfs.listing", {
+                        ...config.tgdcfs.listing,
+                        validate_on_list: e.target.checked,
+                      })
+                    }
+                  />
+                }
+              />
+              <FieldRow>
+                <ConfigTextField
+                  label="Messages kept in memory per channel"
+                  type="number"
+                  value={config.tgdcfs.listing.message_cache_size}
+                  onChange={(e) =>
+                    updateConfig("tgdcfs.listing", {
+                      ...config.tgdcfs.listing,
+                      message_cache_size: parseInt(e.target.value) || 0,
+                    })
+                  }
+                  error={config.tgdcfs.listing.message_cache_size < 1}
+                  helperText={
+                    config.tgdcfs.listing.message_cache_size < 1
+                      ? "At least 1"
+                      : undefined
+                  }
+                  width={260}
+                />
+              </FieldRow>
             </FormSection>
 
             <FormSection title="Transfer Performance (Optional)">

@@ -36,6 +36,9 @@ the fact on the commits that shipped them.
   `pinned_message` they are a `stat` field in `metadata.json`, with
   `github_repo` one `.tgdcfsstats.json` per folder. Only turn it on when
   every instance that writes to the file system supports it.
+- Config generator: a "Large Folders" section for the `listing` block; it
+  is written only with the values that differ from the defaults, and
+  "Load Existing config.yaml" reads it back.
 
 ### Changed
 

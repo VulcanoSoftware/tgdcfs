@@ -93,6 +93,20 @@ export const CACHE_DEFAULTS: CacheConfig = {
   target_fill_percent: 90,
 };
 
+export interface ListingConfig {
+  stat_in_metadata: boolean;
+  validate_on_list: boolean;
+  message_cache_size: number;
+}
+
+// The loader's defaults; the block is written only with the values that
+// differ from them.
+export const LISTING_DEFAULTS: ListingConfig = {
+  stat_in_metadata: false,
+  validate_on_list: true,
+  message_cache_size: 1024,
+};
+
 export interface TransferConfig {
   // UI only: when off, no transfer block is written at all and the
   // application falls back to its own defaults.
@@ -145,6 +159,7 @@ export interface ConfigData {
     transfer: TransferConfig;
     encryption: EncryptionConfig;
     cache: CacheConfig;
+    listing: ListingConfig;
   };
 }
 
@@ -219,6 +234,7 @@ export const defaultConfig = (): ConfigData => ({
       upload_buffer_size_mb: 64,
     },
     cache: { ...CACHE_DEFAULTS },
+    listing: { ...LISTING_DEFAULTS },
     transfer: {
       enabled: false,
       upload_workers_small: 3,
