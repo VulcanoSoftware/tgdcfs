@@ -293,6 +293,10 @@ class DiscordStore(IStore):
         cache = channel_cache(self.channel_id).id
         cached = cache.gets(ids)
         missing = [mid for mid, msg in zip(ids, cached) if msg is None]
+        # The cache is a bounded LRU: a batch larger than it evicts its own
+        # first results while they are stored, so the answer is built from
+        # what was just fetched rather than read back from the cache.
+        resolved: dict[int, MessageResp] = {}
         if missing:
             fetched = await self._retry(
                 "get_messages",
@@ -300,8 +304,10 @@ class DiscordStore(IStore):
             )
             for mid, message in zip(missing, fetched):
                 if message is not None:
-                    cache[mid] = await self._resolve_overflow(message)
-        return cache.gets(ids)
+                    resolved[mid] = cache[mid] = await self._resolve_overflow(message)
+        return [
+            resolved[mid] if mid in resolved else msg for mid, msg in zip(ids, cached)
+        ]
 
     async def search_messages(self, search: str) -> list[MessageResp]:
         # Discord offers no message search to bots; nothing above this

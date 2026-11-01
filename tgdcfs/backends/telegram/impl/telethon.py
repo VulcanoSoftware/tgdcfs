@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 from itertools import cycle
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 from telethon import TelegramClient
 from telethon import functions as tlf
@@ -118,6 +118,11 @@ class TelethonAPI(ITDLibClient):
 
     async def get_messages(self, req: GetMessagesReq) -> GetMessagesResp:
         cache = channel_cache(req.chat).id
+        # The cache is an LRU of limited size: a batch larger than it (a
+        # folder with thousands of files) evicts its own first results while
+        # it is being stored. The answer is therefore built from what was
+        # just fetched, not read back from the cache.
+        fetched: Dict[int, MessageResp] = {}
         if message_id_to_fetch := cache.find_nonexistent(req.message_ids):
             fetched_messages = await self.__get_messages(
                 entity=PeerChannel(channel_id=req.chat), ids=message_id_to_fetch
@@ -125,8 +130,14 @@ class TelethonAPI(ITDLibClient):
 
             for message in exclude_none(self._transform_messages(fetched_messages)):
                 cache[message.message_id] = message
+                fetched[message.message_id] = message
 
-        return GetMessagesResp(cache.gets(req.message_ids))
+        return GetMessagesResp(
+            [
+                fetched[mid] if mid in fetched else cache.get(mid)
+                for mid in req.message_ids
+            ]
+        )
 
     async def send_text(self, req: SendTextReq) -> SendMessageResp:
         message = await self._client.send_message(

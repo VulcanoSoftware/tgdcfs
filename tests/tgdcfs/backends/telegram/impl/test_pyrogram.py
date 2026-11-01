@@ -5,7 +5,7 @@ from pyrogram import Client, file_id
 from pyrogram import types as t
 
 from tgdcfs.errors import TechnicalError
-from tgdcfs.reqres import DownloadFileReq
+from tgdcfs.reqres import DownloadFileReq, GetMessagesReq
 from tgdcfs.backends.telegram.impl.pyrogram import GET_FILE_CHUNK_SIZE, PyrogramAPI
 
 
@@ -70,3 +70,36 @@ class TestPyrogramDownload:
         with pytest.raises(TechnicalError, match="ended after 8 of 100 bytes"):
             async for _ in resp.chunks:
                 pass
+
+
+class TestPyrogramGetMessages:
+    @pytest.mark.asyncio
+    async def test_batch_larger_than_the_cache_is_returned_whole(self, mocker):
+        # Regression (issue #8): a batch bigger than the LRU message cache
+        # (a folder with thousands of files) lost its own first results.
+        from tgdcfs.utils.message_cache import global_message_cache
+
+        global_message_cache.clear()
+        count = 3000
+
+        def make(mid):
+            message = mocker.Mock(spec=t.Message)
+            message.id = mid
+            message.text = f"fd-{mid}"
+            message.document = None
+            return message
+
+        client = mocker.AsyncMock(spec=Client)
+        client.get_messages = mocker.AsyncMock(
+            return_value=[make(mid) for mid in range(1, count + 1)]
+        )
+        api = PyrogramAPI(client)
+
+        resp = await api.get_messages(
+            GetMessagesReq(chat=777, message_ids=tuple(range(1, count + 1)))
+        )
+
+        assert [m.text for m in resp if m is not None] == [
+            f"fd-{mid}" for mid in range(1, count + 1)
+        ]
+        global_message_cache.clear()

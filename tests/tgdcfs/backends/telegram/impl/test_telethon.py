@@ -141,6 +141,33 @@ class TestTelethonAPI:
         assert isinstance(result, list)
 
     @pytest.mark.asyncio
+    async def test_get_messages_batch_larger_than_the_cache(
+        self, telethon_api, mock_chat, mocker
+    ):
+        # Regression (issue #8): a batch bigger than the LRU message cache
+        # (a folder with thousands of files) lost its own first results.
+        count = 3000
+
+        def make(mid):
+            message = mocker.Mock(spec=tlt.Message)
+            message.id = mid
+            message.message = f"fd-{mid}"
+            message.media = None
+            return message
+
+        telethon_api._client.get_messages.return_value = TotalList(
+            [make(mid) for mid in range(1, count + 1)]
+        )
+
+        resp = await telethon_api.get_messages(
+            GetMessagesReq(chat=mock_chat, message_ids=tuple(range(1, count + 1)))
+        )
+
+        assert [m.text for m in resp if m is not None] == [
+            f"fd-{mid}" for mid in range(1, count + 1)
+        ]
+
+    @pytest.mark.asyncio
     async def test_get_messages_with_cached_messages(
         self, telethon_api, mock_chat, mocker
     ):

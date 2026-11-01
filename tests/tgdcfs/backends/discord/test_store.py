@@ -377,6 +377,21 @@ class TestText:
             None,
         ]
 
+    async def test_a_batch_larger_than_the_cache_is_returned_whole(self, store, bot):
+        # Regression (issue #8): reading a folder with thousands of files asks
+        # for more messages than the LRU cache holds; the first results used
+        # to be evicted before they were returned.
+        count = 3000
+        for mid in range(1, count + 1):
+            bot.messages[mid] = {"text": f"fd-{mid}", "data": None, "name": ""}
+        channel_cache(CHANNEL).id._lru.clear()
+
+        result = await store.get_messages(list(range(1, count + 1)))
+
+        assert [m.text for m in result if m is not None] == [
+            f"fd-{mid}" for mid in range(1, count + 1)
+        ]
+
     async def test_search_is_unsupported(self, store):
         assert await store.search_messages("x") == []
 

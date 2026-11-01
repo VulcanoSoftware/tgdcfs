@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-from typing import List, Optional, Sequence, TypeVar
+from typing import Dict, List, Optional, Sequence, TypeVar
 
 from pyrogram import Client, file_id
 from pyrogram import enums as e
@@ -97,6 +97,9 @@ class PyrogramAPI(ITDLibClient):
 
     async def get_messages(self, req: GetMessagesReq) -> GetMessagesResp:
         cache = channel_cache(req.chat).id
+        # A batch larger than the LRU cache evicts its own first results while
+        # storing them, so the answer is built from what was just fetched.
+        fetched: Dict[int, MessageResp] = {}
         if message_id_to_fetch := cache.find_nonexistent(req.message_ids):
             if not (
                 fetched_messages := await self._client.get_messages(
@@ -112,8 +115,14 @@ class PyrogramAPI(ITDLibClient):
 
             for message in exclude_none(self._transform_messages(fetched_messages)):
                 cache[message.message_id] = message
+                fetched[message.message_id] = message
 
-        return GetMessagesResp(cache.gets(req.message_ids))
+        return GetMessagesResp(
+            [
+                fetched[mid] if mid in fetched else cache.get(mid)
+                for mid in req.message_ids
+            ]
+        )
 
     async def send_text(self, req: SendTextReq) -> SendMessageResp:
         message = await self._client.send_message(chat_id=req.chat, text=req.text)
