@@ -13,6 +13,7 @@ from tgdcfs.utils.time import FIRST_DAY_OF_EPOCH, ts
 
 from .common import validate_name
 from .serialized import TGFSDirectorySerialized, TGFSFileRefSerialized
+from .stat import FileStat
 
 
 @dataclass
@@ -30,6 +31,15 @@ class TGFSFileRef:
     # ``TGFSFileVersion.store``.
     store: Optional[str] = None
 
+    # Size and dates for listings, kept in the metadata with
+    # ``listing.stat_in_metadata``; ``None`` when not known there. Readers
+    # that do not know the field (tgfs) ignore it.
+    stat: Optional[FileStat] = field(default=None, compare=False)
+
+    # Bumped whenever ``stat`` is dropped because the file changed, so a
+    # stat read from the descriptor before the change is not stored.
+    stat_epoch: int = field(default=0, compare=False, repr=False)
+
     def to_dict(self) -> TGFSFileRefSerialized:
         res = TGFSFileRefSerialized(
             type="FR",
@@ -40,6 +50,8 @@ class TGFSFileRef:
             res["mirrors"] = self.mirrors
         if self.store:
             res["store"] = self.store
+        if self.stat is not None:
+            res["stat"] = self.stat.to_dict()
         return res
 
     def owned_by(self, store_key: str) -> bool:
@@ -227,6 +239,7 @@ class TGFSDirectory:
                         if file.get("store")
                         else None
                     ),
+                    stat=FileStat.from_dict(file.get("stat")),
                 )
                 for file in data["files"]
                 if file["name"] and file["messageId"]
@@ -338,6 +351,10 @@ class TGFSDirectory:
         moved = to.create_file_ref(name, fr.message_id)
         moved.mirrors = dict(fr.mirrors)
         moved.store = fr.store
+        # Same descriptor, same content: what a listing shows moves along,
+        # and so does whether it changed since the start.
+        moved.stat = fr.stat
+        moved.stat_epoch = fr.stat_epoch
         try:
             self.delete_file_ref(fr)
         except Exception:

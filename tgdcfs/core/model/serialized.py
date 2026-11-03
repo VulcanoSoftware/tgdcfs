@@ -1,5 +1,7 @@
 from typing import Dict, List, Literal, TypedDict
 
+from .stat import FileStatSerialized
+
 
 class ReplicaSerialized(TypedDict, total=False):
     # Message ids as a JSON list, or packed (``mb``) when there are many.
@@ -48,6 +50,8 @@ class TGFSFileRefSerialized(TypedDict, total=False):
     mirrors: Dict[str, int]
     # Store key that messageId belongs to; absent for refs written by tgfs.
     store: str
+    # Size and dates for listings (``listing.stat_in_metadata``).
+    stat: FileStatSerialized
 
 
 class TGFSDirectorySerialized(TypedDict, total=False):

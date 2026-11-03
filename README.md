@@ -818,6 +818,75 @@ raising anything else.
 `scripts/measure_transfer.py` shows what the piece-level parallelism is
 worth against a simulated link, without needing a channel.
 
+## Large folders
+
+A folder listing (WebDAV `PROPFIND`, SFTP `ls`) shows the size and dates of
+every file. The directory tree in the metadata only knows the names; size
+and dates are in each file's descriptor message in the store. Listing a
+folder of 10,000 files therefore reads 10,000 descriptors and checks that
+the content messages of each one still exist: about 20,000 messages, which
+on Telegram means hundreds of requests and on Discord one request per
+message. Clients give up long before that.
+
+The optional `listing` block makes this cheaper. Without it nothing changes.
+
+```yaml
+tgdcfs:
+  listing:
+    stat_in_metadata: false    # true: keep size and dates in the metadata
+    validate_on_list: true     # false: check the content messages on read only
+    message_cache_size: 1024   # messages kept in memory per channel
+```
+
+**`stat_in_metadata: true`** keeps each file's size and dates next to its
+entry in the metadata, so a listing reads no descriptor at all:
+
+* `pinned_message`: in `metadata.json`, as a `stat` field on each file.
+* `github_repo`: in one `.tgdcfsstats.json` per folder, next to the file
+  entries, keyed by descriptor message id. It is read on the folder's
+  first listing after a start.
+
+Nothing has to be prepared. A file whose values are not stored yet is read
+from its descriptor on the first listing, and the values are written back
+in the background: after 5 seconds without new values, at least once a
+minute during a long listing, and on shutdown. A client that gives up on a
+huge folder does not lose that work: the descriptor reads it started run to
+the end, and the next attempt finds their results. A write to a file drops
+its stored values, and the next listing reads them again.
+
+Keep in mind:
+
+* **Every instance that writes must support it.** An older tgdcfs or tgfs
+  that overwrites a file leaves the stored size unchanged, and listings
+  keep showing the old one. Instances that only read are fine; tgfs ignores
+  the extra fields. tgfs logs an "Invalid name format" warning for each
+  `.tgdcfsstats.json` it finds in a `github_repo` metadata repository.
+* **The metadata grows** by about 70 bytes per file. With
+  `pinned_message` on a Discord primary the whole `metadata.json` has to
+  fit one attachment; a tree of very many files can outgrow it there.
+* **Sizes and dates go into the metadata store.** With encryption on, they
+  are the plaintext sizes; for a public `github_repo` repository that is
+  more than the file names alone give away.
+* With `github_repo`, writing the values is a commit (`Update file stats of
+  N folder(s)`). Folder dates come from the git history and ignore these
+  commits, so a listing does not make a folder look changed.
+* Turning the option off again removes the stored values bit by bit: the
+  stats file of a folder goes on the next write in that folder
+  (`github_repo`), all values go on the next write anywhere
+  (`pinned_message`).
+
+**`validate_on_list: false`** skips the check of the content messages while
+listing and halves the reads. The sizes are the ones the descriptor recorded
+when the file was written. A file whose messages were deleted in the channel
+by hand is then listed with its old size and fails on download, instead of
+showing up with 0 bytes.
+
+**`message_cache_size`** is how many messages are kept in memory per
+channel (default 1024). A folder with more files than that evicts its own
+descriptors during the listing, so the next listing reads all of them
+again. Descriptor messages are small; 50,000 entries cost a few tens of
+megabytes.
+
 ## Web frontend
 
 The Next.js app in `tgdcfs-gh-pages/` is published at

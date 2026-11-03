@@ -288,11 +288,55 @@ class TestLookups:
         assert store._queue.empty()
 
 
+class TestStatsFiles:
+    def test_a_written_stats_file_keeps_the_cached_dates(self, mock_repo, tmp_path):
+        write_cache(tmp_path / "c.json", ["Serien", "Serien/Dark"])
+        mock_repo.get_branch.return_value.commit.sha = "head1111"
+        mock_repo.compare.return_value.files = [
+            changed_file("Serien/Dark/.tgdcfsstats.json")
+        ]
+        store = store_for(mock_repo, tmp_path / "c.json")
+
+        store.load()
+
+        assert store.get("Serien/Dark") == (CREATED, MODIFIED)
+        assert store.get("Serien") == (CREATED, MODIFIED)
+
+
 class TestResolve:
-    def _commit_at(self, date):
+    def _commit_at(self, date, message="Create file reference for a"):
         commit = Mock()
         commit.commit.committer.date = date
+        commit.commit.message = message
         return [commit]
+
+    def test_commits_that_only_wrote_stats_do_not_date_the_folder(
+        self, mock_repo, tmp_path
+    ):
+        later = MODIFIED + datetime.timedelta(days=3)
+        mock_repo.get_commits.side_effect = [
+            self._commit_at(later, "Update file stats of 2 folder(s)")
+            + self._commit_at(MODIFIED),
+            self._commit_at(CREATED),
+        ]
+        store = store_for(mock_repo, tmp_path / "c.json")
+
+        store._resolve("Filme")
+
+        assert store.get("Filme") == (CREATED, MODIFIED)
+
+    def test_a_folder_with_only_stats_commits_keeps_the_newest(
+        self, mock_repo, tmp_path
+    ):
+        mock_repo.get_commits.side_effect = [
+            self._commit_at(MODIFIED, "Update file stats of 1 folder(s)"),
+            self._commit_at(CREATED),
+        ]
+        store = store_for(mock_repo, tmp_path / "c.json")
+
+        store._resolve("Filme")
+
+        assert store.get("Filme") == (CREATED, MODIFIED)
 
     def test_created_comes_from_the_gitkeep_and_modified_from_the_directory(
         self, mock_repo, tmp_path

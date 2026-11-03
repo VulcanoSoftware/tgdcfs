@@ -59,9 +59,17 @@ class FileDescApi:
         return await self.append_file_version(file_msg, fr=None)
 
     async def get_file_desc(
-        self, fr: TGFSFileRef, include_all_versions: bool = False
+        self,
+        fr: TGFSFileRef,
+        include_all_versions: bool = False,
+        validate: bool = True,
     ) -> TGFSFileDesc:
-        return await self.__fd_repo.get(fr, include_all_versions)
+        return await self.__fd_repo.get(fr, include_all_versions, validate)
+
+    async def content_length(self, fv: TGFSFileVersion) -> int:
+        """The size of ``fv`` as a client receives it (the plaintext size
+        when encryption is on)."""
+        return await self.__fc_repo.content_length(fv)
 
     async def save_new_file_desc(self, fd: TGFSFileDesc) -> FDRepositoryResp:
         """Write ``fd`` to a brand new descriptor message.

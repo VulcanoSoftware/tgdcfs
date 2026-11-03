@@ -1,30 +1,49 @@
 import asyncio
+import base64
 import datetime
+import hashlib
+import json
 import logging
-from typing import Optional
+from typing import Iterable, Optional
 
-from github import Github
+from github import Github, GithubException, InputGitTreeElement
 from github.ContentFile import ContentFile
 from github.GitTreeElement import GitTreeElement
 
 from tgdcfs.config import GithubRepoConfig, expand_path
-from tgdcfs.core.model import TGFSMetadata
+from tgdcfs.core.model import FileStat, TGFSDirectory, TGFSMetadata
 from tgdcfs.core.repository.interface import IMetaDataRepository
 from tgdcfs.crypto.path_names import (
     PathNameEncryptionError,
     decrypt_path_name,
     is_encrypted_path_name,
 )
+from tgdcfs.errors import TechnicalError
 
 from .dir_timestamps import DirTimestampStore, cache_file_name
 from .gh_directory import GithubConfig, GithubDirectory
+from .stats_file import STATS_COMMIT_PREFIX, STATS_FILE_NAME
 
 logger = logging.getLogger(__name__)
+
+
+# How often a stats commit is retried when the branch moved under it.
+STATS_COMMIT_ATTEMPTS = 3
+
+
+def _blob_sha(content: str) -> str:
+    """The git blob sha of ``content``, as GitHub will report it."""
+    data = content.encode()
+    # Git's object id, not a security measure.
+    return hashlib.sha1(
+        b"blob %d\0" % len(data) + data, usedforsecurity=False
+    ).hexdigest()
 
 
 class GithubRepoMetadataRepository(IMetaDataRepository):
     def __init__(self, config: GithubRepoConfig, name_key: Optional[bytes] = None):
         super().__init__()
+        self._stats_loads: dict[int, asyncio.Future[bool]] = {}
 
         gh = Github(config.access_token)
         repo = gh.get_repo(config.repo)
@@ -46,6 +65,151 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
 
     async def push(self) -> None:
         pass
+
+    # -- file stats (``listing.stat_in_metadata``) -------------------------
+    #
+    # Every folder that has stats keeps them in its own ``.tgdcfsstats.json``
+    # next to the file refs, keyed by descriptor message id, so a move or a
+    # rename keeps them without a write. The tree load only notes the blob
+    # sha; the content is read on the folder's first listing.
+
+    push_writes_stats = False
+
+    async def load_stats(self, directory: TGFSDirectory) -> bool:
+        if not isinstance(directory, GithubDirectory) or directory.stats_loaded:
+            return True
+        if directory.stats_sha is None:
+            directory.stats_loaded = True
+            return True
+        # Ten thousand concurrent listings of one folder read the blob once.
+        key = id(directory)
+        task = self._stats_loads.get(key)
+        if task is None:
+            task = asyncio.ensure_future(self._load_stats(directory))
+            self._stats_loads[key] = task
+            task.add_done_callback(lambda _: self._stats_loads.pop(key, None))
+        # Shielded: a client that gives up does not cancel the read for the
+        # listings that wait on it.
+        return await asyncio.shield(task)
+
+    async def _load_stats(self, directory: GithubDirectory) -> bool:
+        sha = directory.stats_sha
+        if sha is None:
+            directory.stats_loaded = True
+            return True
+        try:
+            blob = await asyncio.to_thread(self._ghc.repo.get_git_blob, sha)
+            entries = json.loads(base64.b64decode(blob.content))
+            if not isinstance(entries, dict):
+                raise ValueError("not a JSON object")
+        except Exception as ex:
+            logger.warning(
+                f"Could not read {directory.stats_path} from "
+                f"{self._ghc.repo_name}: {ex}"
+            )
+            return False
+        for fr in directory.find_files():
+            # A ref that changed since the start has a stored entry from
+            # before the change; it stays empty and is read again.
+            if fr.stat is None and fr.stat_epoch == 0:
+                fr.stat = FileStat.from_dict(entries.get(str(fr.message_id)))
+        directory.stats_loaded = True
+        return True
+
+    def stats_stored(self, directory: TGFSDirectory) -> bool:
+        return isinstance(directory, GithubDirectory) and (
+            directory.stats_sha is not None
+        )
+
+    async def save_stats(
+        self, directories: Iterable[TGFSDirectory], keep: bool
+    ) -> None:
+        """Write the stats files of ``directories`` in one commit.
+
+        Raises when a folder's stored stats could not be read first or the
+        commit failed; the caller keeps the folders and tries again.
+        """
+        changes: list[tuple[GithubDirectory, Optional[str]]] = []
+        unreadable: list[str] = []
+        # Directories compare by content, so they are told apart by identity.
+        for directory in {id(d): d for d in directories}.values():
+            if not isinstance(directory, GithubDirectory):
+                continue
+            if not directory.is_attached():
+                # Deleted meanwhile; its stats file went with it.
+                continue
+            if keep and not await self.load_stats(directory):
+                unreadable.append(directory.stats_path)
+                continue
+            content = self._stats_content(directory) if keep else None
+            if content is None:
+                if directory.stats_sha is not None:
+                    changes.append((directory, None))
+            elif _blob_sha(content) != directory.stats_sha:
+                changes.append((directory, content))
+
+        if changes:
+            # Paths and contents are fixed here, on the event loop; the
+            # thread only talks to GitHub.
+            writes = [(d.stats_path, content) for d, content in changes]
+            await asyncio.to_thread(self._commit_stats, writes)
+            for directory, content in changes:
+                directory.stats_sha = None if content is None else _blob_sha(content)
+                directory.stats_loaded = True
+
+        if unreadable:
+            raise TechnicalError(
+                f"Could not read the stored stats of {', '.join(unreadable)}"
+            )
+
+    @staticmethod
+    def _stats_content(directory: GithubDirectory) -> Optional[str]:
+        entries = {
+            str(fr.message_id): fr.stat.to_dict()
+            for fr in directory.find_files()
+            if fr.stat is not None
+        }
+        if not entries:
+            return None
+        return json.dumps(entries, sort_keys=True, separators=(",", ":"))
+
+    def _commit_stats(self, writes: list[tuple[str, Optional[str]]]) -> None:
+        """One commit on top of the branch head; retried when another
+        commit landed in between (the ref update is not forced)."""
+        repo = self._ghc.repo
+        elements = [
+            (
+                InputGitTreeElement(path=path, mode="100644", type="blob", sha=None)
+                if content is None
+                else InputGitTreeElement(
+                    path=path, mode="100644", type="blob", content=content
+                )
+            )
+            for path, content in writes
+        ]
+        for attempt in range(STATS_COMMIT_ATTEMPTS):
+            ref = repo.get_git_ref(f"heads/{self._ghc.commit}")
+            base_commit = repo.get_git_commit(ref.object.sha)
+            tree = repo.create_git_tree(elements, base_tree=base_commit.tree)
+            commit = repo.create_git_commit(
+                f"{STATS_COMMIT_PREFIX} of {len(writes)} folder(s)",
+                tree,
+                [base_commit],
+            )
+            try:
+                ref.edit(commit.sha)
+                logger.info(
+                    f"Wrote the stats of {len(writes)} folder(s) "
+                    f"to {self._ghc.repo_name}"
+                )
+                return
+            except GithubException as ex:
+                if attempt + 1 == STATS_COMMIT_ATTEMPTS:
+                    raise
+                logger.info(
+                    f"Branch {self._ghc.commit} moved while writing file stats "
+                    f"({ex.status}), retrying"
+                )
 
     async def get(self) -> TGFSMetadata:
         # One call to read the repo head plus at most one to diff it against
@@ -118,6 +282,10 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
             elif entry.type == "blob":
                 parent_path, _, segment = entry.path.rpartition("/")
                 if segment == ".gitkeep":
+                    continue
+                if segment == STATS_FILE_NAME:
+                    # Read on the folder's first listing, not here.
+                    self._dir_at(parent_path, dirs).stats_sha = entry.sha
                     continue
                 try:
                     stored_name, message_id = segment.rsplit(".", 1)
@@ -244,6 +412,9 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
             elif content.type == "file":
                 try:
                     if content.name == ".gitkeep":
+                        continue
+                    if content.name == STATS_FILE_NAME:
+                        parent_dir.stats_sha = content.sha
                         continue
                     stored_name, message_id = content.name.rsplit(".", 1)
                     file_name, _ = self._decode_name(stored_name)

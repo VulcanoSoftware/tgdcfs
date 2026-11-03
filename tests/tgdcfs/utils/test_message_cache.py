@@ -1,4 +1,11 @@
-from tgdcfs.utils.message_cache import MessageCache
+import pytest
+
+from tgdcfs.utils import message_cache
+from tgdcfs.utils.message_cache import (
+    MessageCache,
+    channel_cache,
+    set_message_cache_size,
+)
 
 
 class TestMessageCache:
@@ -78,3 +85,20 @@ class TestMessageCache:
 
         for i in range(10):
             assert cache[i] == f"value_{i}"
+
+
+class TestMessageCacheSize:
+    def teardown_method(self):
+        set_message_cache_size(message_cache.DEFAULT_SIZE)
+
+    def test_resizes_existing_and_new_channels(self):
+        existing = channel_cache(-424242).id
+
+        set_message_cache_size(5000)
+
+        assert existing._lru.get_size() == 5000
+        assert channel_cache(-434343).id._lru.get_size() == 5000
+
+    def test_rejects_an_empty_cache(self):
+        with pytest.raises(ValueError):
+            set_message_cache_size(0)

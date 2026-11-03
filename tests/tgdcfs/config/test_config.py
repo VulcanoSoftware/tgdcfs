@@ -5,6 +5,7 @@ from tgdcfs.config import (
     Config,
     GithubRepoConfig,
     JWTConfig,
+    ListingConfig,
     ManagerConfig,
     MetadataConfig,
     MetadataConfigDict,
@@ -256,6 +257,31 @@ class TestCacheConfig:
     def test_tiny_block_rejected(self):
         with pytest.raises(ValueError, match="block_kb"):
             CacheConfig.from_dict({"block_kb": 16})
+
+
+class TestListingConfig:
+    def test_defaults_when_absent(self):
+        listing = ListingConfig.from_dict(None)
+        assert listing.stat_in_metadata is False
+        assert listing.validate_on_list is True
+        assert listing.message_cache_size == 1024
+
+    def test_values_are_read(self):
+        listing = ListingConfig.from_dict(
+            {
+                "stat_in_metadata": True,
+                "validate_on_list": False,
+                "message_cache_size": 50000,
+            }
+        )
+        assert listing.stat_in_metadata is True
+        assert listing.validate_on_list is False
+        assert listing.message_cache_size == 50000
+
+    @pytest.mark.parametrize("bad", [0, -1])
+    def test_message_cache_needs_room(self, bad):
+        with pytest.raises(ValueError, match="message_cache_size"):
+            ListingConfig.from_dict({"message_cache_size": bad})
 
 
 class TestTransferConfig:

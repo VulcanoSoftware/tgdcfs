@@ -6,6 +6,7 @@ from tgdcfs.app.sftp.server import USER_INFO_KEY, TGFSSFTPServer
 from tgdcfs.auth.user import AdminUser, ReadonlyUser
 from tgdcfs.core import Client
 from tgdcfs.core.model import TGFSDirectory, TGFSFileDesc, TGFSFileVersion
+from tests.tgdcfs.app.sftp.mocked_stats import mocked_stats
 
 CREATED_AT = datetime.datetime(2024, 1, 1, 12, 0, 0)
 UPDATED_AT = datetime.datetime(2024, 6, 1, 12, 0, 0)
@@ -57,6 +58,7 @@ def build_client(mocker, name: str) -> Client:
 
     client.fc_repo = mocker.Mock()
     client.fc_repo.content_length = mocker.AsyncMock(return_value=FILE_SIZE)
+    client.file_api.stats = mocked_stats(client)
     return client
 
 

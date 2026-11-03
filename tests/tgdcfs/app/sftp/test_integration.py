@@ -14,6 +14,7 @@ from tgdcfs.app.sftp.server import make_server_factory, make_sftp_factory
 from tgdcfs.config import SFTPConfig
 from tgdcfs.core import Client
 from tgdcfs.core.model import TGFSDirectory, TGFSFileDesc, TGFSFileVersion
+from tests.tgdcfs.app.sftp.mocked_stats import mocked_stats
 
 CONTENT = bytes(range(256)) * 400  # 100 KiB
 CREATED_AT = datetime.datetime(2024, 1, 1, 12, 0, 0)
@@ -95,6 +96,7 @@ def build_client(mocker, name: str, channel: FakeChannel) -> Client:
 
     client.fc_repo = mocker.Mock()
     client.fc_repo.content_length = mocker.AsyncMock(side_effect=lambda fv: fv.size)
+    client.file_api.stats = mocked_stats(client)
     return client
 
 

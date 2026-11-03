@@ -579,6 +579,50 @@ class CacheConfig:
 
 
 @dataclass
+class ListingConfig:
+    """How folder listings (WebDAV PROPFIND, SFTP readdir/stat) are served.
+
+    A listing needs the size and dates of every file, and those live in
+    each file's descriptor message in the store, not in the directory
+    tree. A folder of ten thousand files therefore costs ten thousand
+    descriptor reads plus a check of every content message.
+
+    ``validate_on_list: false`` skips the check that a file's content
+    messages still exist while listing; the check then happens on the
+    first read. ``message_cache_size`` is the number of messages kept in
+    memory per channel.
+
+    ``stat_in_metadata`` keeps size and dates next to the file refs in the
+    metadata (in ``metadata.json`` for ``pinned_message``, in one
+    ``.tgdcfsstats.json`` per folder for ``github_repo``); a listing then
+    reads no descriptor at all. A value missing there is read from the
+    descriptor on the first listing and written back. Only safe when every
+    instance that writes to the file system supports it: one that does not
+    leaves the stored value unchanged when it overwrites a file.
+    """
+
+    stat_in_metadata: bool = False
+    validate_on_list: bool = True
+    message_cache_size: int = 1024
+
+    DEFAULT_MESSAGE_CACHE_SIZE = 1024
+
+    @classmethod
+    def from_dict(cls, data: Optional[dict]) -> "ListingConfig":
+        data = data or {}
+        size = int(data.get("message_cache_size", cls.DEFAULT_MESSAGE_CACHE_SIZE))
+        if size < 1:
+            raise ValueError(
+                f"listing.message_cache_size must be at least 1, got {size}"
+            )
+        return cls(
+            stat_in_metadata=bool(data.get("stat_in_metadata", False)),
+            validate_on_list=bool(data.get("validate_on_list", True)),
+            message_cache_size=size,
+        )
+
+
+@dataclass
 class TGFSConfig:
     users: dict[str, UserConfig]
     jwt: JWTConfig
@@ -588,6 +632,7 @@ class TGFSConfig:
     sftp: SFTPConfig
     transfer: TransferConfig
     cache: CacheConfig = field(default_factory=lambda: CacheConfig.disabled())
+    listing: ListingConfig = field(default_factory=ListingConfig)
 
     @classmethod
     def from_dict(cls, data: Dict) -> Self:
@@ -611,6 +656,7 @@ class TGFSConfig:
             sftp=SFTPConfig.from_dict(data.get("sftp")),
             transfer=TransferConfig.from_dict(data.get("transfer")),
             cache=CacheConfig.from_dict(data.get("cache")),
+            listing=ListingConfig.from_dict(data.get("listing")),
         )
 
 

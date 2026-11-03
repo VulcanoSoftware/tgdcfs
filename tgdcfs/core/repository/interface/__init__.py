@@ -1,6 +1,6 @@
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, Iterator, List, Optional
 
 from tgdcfs.core.model import (
     TGFSDirectory,
@@ -88,14 +88,21 @@ class IFDRepository(metaclass=ABCMeta):
 
     @abstractmethod
     async def get(
-        self, fr: TGFSFileRef, include_all_versions: bool = False
+        self,
+        fr: TGFSFileRef,
+        include_all_versions: bool = False,
+        validate: bool = True,
     ) -> TGFSFileDesc:
+        """The descriptor of ``fr``. ``validate=False`` skips the check that
+        its content messages still exist and trusts the recorded sizes."""
         pass
 
 
 class IMetaDataRepository(metaclass=ABCMeta):
     def __init__(self):
         self.metadata: Optional[TGFSMetadata] = None
+        # Whether the loaded tree carries stats; worked out on first ask.
+        self._tree_has_stats: Optional[bool] = None
 
     async def init(self):
         self.metadata = await self.get()
@@ -112,3 +119,46 @@ class IMetaDataRepository(metaclass=ABCMeta):
         if not self.metadata:
             raise MetadataNotInitialized
         return self.metadata.dir
+
+    # -- file stats (``listing.stat_in_metadata``) -------------------------
+    #
+    # The defaults fit a backend that serializes the whole tree on every
+    # push: the stats ride along on the file refs. A backend that keeps
+    # them apart from the tree overrides all of this.
+
+    # Whether ``push`` writes the stats of every file ref.
+    push_writes_stats: bool = True
+
+    async def load_stats(self, directory: TGFSDirectory) -> bool:
+        """Put the stored stats of ``directory``'s files on their refs.
+
+        Returns False when they could not be read; the caller must then
+        not write that directory's stats, or it would drop the ones it
+        could not see.
+        """
+        return True
+
+    def stats_stored(self, directory: TGFSDirectory) -> bool:
+        """Whether the store may hold stats for files in ``directory``."""
+        if self._tree_has_stats is None:
+            self._tree_has_stats = any(
+                fr.stat is not None for fr in _iter_file_refs(self.root())
+            )
+        return self._tree_has_stats
+
+    async def save_stats(
+        self, directories: Iterable[TGFSDirectory], keep: bool
+    ) -> None:
+        """Write the stats of ``directories``; ``keep=False`` removes every
+        stored stat instead (``stat_in_metadata`` turned off)."""
+        if not keep:
+            for fr in _iter_file_refs(self.root()):
+                fr.stat = None
+            self._tree_has_stats = False
+        await self.push()
+
+
+def _iter_file_refs(directory: TGFSDirectory) -> Iterator[TGFSFileRef]:
+    yield from directory.find_files()
+    for child in directory.find_dirs():
+        yield from _iter_file_refs(child)

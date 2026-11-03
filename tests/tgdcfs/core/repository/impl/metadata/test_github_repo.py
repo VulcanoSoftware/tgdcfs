@@ -1,16 +1,18 @@
+import base64
 import datetime
 import json
 
 import pytest
 from unittest.mock import Mock, MagicMock, patch
 from typing import List
-from github import Github
+from github import Github, GithubException
 from github.Repository import Repository
 from github.ContentFile import ContentFile
 from github.GitTreeElement import GitTreeElement
 
 from tgdcfs.config import GithubRepoConfig
-from tgdcfs.core.model import TGFSDirectory, TGFSFileRef, TGFSMetadata
+from tgdcfs.core.model import FileStat, TGFSDirectory, TGFSFileRef, TGFSMetadata
+from tgdcfs.errors import TechnicalError
 from tgdcfs.core.repository.impl.metadata.github_repo import (
     GithubRepoMetadataRepository,
 )
@@ -1208,3 +1210,218 @@ class TestEdgeCases:
             assert len(root_dir.files) == 1
             assert root_dir.files[0].name == "single"
             assert root_dir.files[0].message_id == 123
+
+
+class TestStatsFiles:
+    """``listing.stat_in_metadata`` with ``github_repo``: one
+    ``.tgdcfsstats.json`` per folder, next to the file refs."""
+
+    @pytest.fixture
+    def repo(self):
+        repo = Mock(spec=Repository)
+        repo.created_at = None
+        repo.pushed_at = None
+        repo.updated_at = None
+        return repo
+
+    @pytest.fixture
+    def repository(self, repo, mock_github_config):
+        with patch(
+            "tgdcfs.core.repository.impl.metadata.github_repo.Github"
+        ) as github_class:
+            github_class.return_value.get_repo.return_value = repo
+            repository = GithubRepoMetadataRepository(mock_github_config)
+        return repository
+
+    def load(self, repository, repo, entries):
+        tree = Mock()
+        tree.truncated = False
+        tree.tree = []
+        for path, sha in entries:
+            entry = Mock(spec=GitTreeElement)
+            entry.path = path
+            entry.type = "blob"
+            entry.sha = sha
+            tree.tree.append(entry)
+        repo.get_git_tree.return_value = tree
+        root = repository._build_directory_structure()
+        repository.metadata = TGFSMetadata(dir=root)
+        return root
+
+    @staticmethod
+    def blob(entries):
+        blob = Mock()
+        blob.content = base64.b64encode(json.dumps(entries).encode()).decode()
+        return blob
+
+    @staticmethod
+    def stat(size):
+        return FileStat(size=size, created_at=1, modified_at=2)
+
+    def test_the_tree_load_notes_the_stats_file_and_does_not_list_it(
+        self, repository, repo
+    ):
+        root = self.load(
+            repository,
+            repo,
+            [
+                ("a.txt.10", "s1"),
+                ("sub/b.txt.11", "s2"),
+                ("sub/.tgdcfsstats.json", "x"),
+            ],
+        )
+
+        sub = root.children[0]
+        assert [f.name for f in sub.files] == ["b.txt"]
+        assert sub.stats_sha == "x"
+        assert root.stats_sha is None
+
+    @pytest.mark.asyncio
+    async def test_stats_are_read_on_first_use_only(self, repository, repo):
+        root = self.load(
+            repository, repo, [("a.txt.10", "s1"), (".tgdcfsstats.json", "x")]
+        )
+        repo.get_git_blob.return_value = self.blob(
+            {"10": {"size": 5, "createdAt": 1, "modifiedAt": 2}}
+        )
+
+        assert await repository.load_stats(root) is True
+        assert await repository.load_stats(root) is True
+
+        assert root.files[0].stat == FileStat(size=5, created_at=1, modified_at=2)
+        repo.get_git_blob.assert_called_once_with("x")
+
+    @pytest.mark.asyncio
+    async def test_a_file_changed_before_the_read_keeps_no_old_stat(
+        self, repository, repo
+    ):
+        root = self.load(
+            repository, repo, [("a.txt.10", "s1"), (".tgdcfsstats.json", "x")]
+        )
+        repo.get_git_blob.return_value = self.blob(
+            {"10": {"size": 5, "createdAt": 1, "modifiedAt": 2}}
+        )
+        root.files[0].stat_epoch = 1  # overwritten since the start
+
+        await repository.load_stats(root)
+
+        assert root.files[0].stat is None
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_stats_file_is_reported(self, repository, repo):
+        root = self.load(
+            repository, repo, [("a.txt.10", "s1"), (".tgdcfsstats.json", "x")]
+        )
+        repo.get_git_blob.side_effect = RuntimeError("rate limited")
+
+        assert await repository.load_stats(root) is False
+        assert root.stats_loaded is False
+
+    def commit_mocks(self, repo):
+        ref = Mock()
+        ref.object.sha = "head"
+        repo.get_git_ref.return_value = ref
+        base = Mock()
+        repo.get_git_commit.return_value = base
+        repo.create_git_commit.return_value = Mock(sha="new")
+        return ref, base
+
+    @pytest.mark.asyncio
+    async def test_folders_are_written_in_one_commit(self, repository, repo):
+        root = self.load(repository, repo, [("a.txt.10", "s1"), ("sub/b.txt.11", "s2")])
+        sub = root.children[0]
+        root.files[0].stat = self.stat(5)
+        sub.files[0].stat = self.stat(6)
+        ref, base = self.commit_mocks(repo)
+
+        await repository.save_stats([root, sub], keep=True)
+
+        repo.create_git_tree.assert_called_once()
+        (elements,) = repo.create_git_tree.call_args.args
+        assert repo.create_git_tree.call_args.kwargs["base_tree"] is base.tree
+        written = {e._identity["path"]: e._identity for e in elements}
+        assert set(written) == {".tgdcfsstats.json", "sub/.tgdcfsstats.json"}
+        assert json.loads(written["sub/.tgdcfsstats.json"]["content"]) == {
+            "11": {"size": 6, "createdAt": 1, "modifiedAt": 2}
+        }
+        ref.edit.assert_called_once_with("new")
+        assert sub.stats_sha is not None
+
+    @pytest.mark.asyncio
+    async def test_unchanged_stats_are_not_written_again(self, repository, repo):
+        root = self.load(repository, repo, [("a.txt.10", "s1")])
+        root.files[0].stat = self.stat(5)
+        self.commit_mocks(repo)
+        await repository.save_stats([root], keep=True)
+        repo.create_git_commit.reset_mock()
+
+        await repository.save_stats([root], keep=True)
+
+        repo.create_git_commit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_folder_without_stats_loses_its_file(self, repository, repo):
+        root = self.load(
+            repository, repo, [("a.txt.10", "s1"), (".tgdcfsstats.json", "x")]
+        )
+        repo.get_git_blob.return_value = self.blob({})
+        self.commit_mocks(repo)
+
+        await repository.save_stats([root], keep=True)
+
+        (elements,) = repo.create_git_tree.call_args.args
+        assert elements[0]._identity == {
+            "path": ".tgdcfsstats.json",
+            "mode": "100644",
+            "type": "blob",
+            "sha": None,
+        }
+        assert root.stats_sha is None
+
+    @pytest.mark.asyncio
+    async def test_turned_off_removes_the_file(self, repository, repo):
+        root = self.load(
+            repository, repo, [("a.txt.10", "s1"), (".tgdcfsstats.json", "x")]
+        )
+        self.commit_mocks(repo)
+
+        await repository.save_stats([root], keep=False)
+
+        repo.get_git_blob.assert_not_called()
+        (elements,) = repo.create_git_tree.call_args.args
+        assert elements[0]._identity["sha"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_deleted_folder_is_skipped(self, repository, repo):
+        root = self.load(repository, repo, [("sub/b.txt.11", "s2")])
+        sub = root.children[0]
+        sub.files[0].stat = self.stat(6)
+        root.children.remove(sub)
+
+        await repository.save_stats([sub], keep=True)
+
+        repo.create_git_commit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_folder_is_not_overwritten(self, repository, repo):
+        root = self.load(
+            repository, repo, [("a.txt.10", "s1"), (".tgdcfsstats.json", "x")]
+        )
+        repo.get_git_blob.side_effect = RuntimeError("rate limited")
+
+        with pytest.raises(TechnicalError):
+            await repository.save_stats([root], keep=True)
+
+        repo.create_git_commit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_moved_branch_is_retried(self, repository, repo):
+        root = self.load(repository, repo, [("a.txt.10", "s1")])
+        root.files[0].stat = self.stat(5)
+        ref, _ = self.commit_mocks(repo)
+        ref.edit.side_effect = [GithubException(422, "not a fast forward"), None]
+
+        await repository.save_stats([root], keep=True)
+
+        assert ref.edit.call_count == 2
+        assert repo.get_git_ref.call_count == 2

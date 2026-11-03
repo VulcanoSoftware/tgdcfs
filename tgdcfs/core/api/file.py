@@ -27,6 +27,7 @@ from tgdcfs.reqres import (
 
 from .file_desc import FileDescApi
 from .metadata import MetaDataApi
+from .stat import FileStatApi
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ class FileApi:
         inline_mirroring: bool = True,
         on_written: Optional[Callable[[TGFSFileRef], Awaitable[None]]] = None,
         written_gaps_only: bool = False,
+        stat_api: Optional[FileStatApi] = None,
     ):
         self._metadata_api = metadata_api
         self._file_desc_api = file_desc_api
@@ -65,6 +67,8 @@ class FileApi:
         # copy of (a mirror that failed mid-stream, a server-side copy
         # that was refused, a copy of a file made without a stream).
         self._written_gaps_only = written_gaps_only
+        # What listings show of a file; see ``FileStatApi``.
+        self.stats = stat_api or FileStatApi(file_desc_api)
 
     async def _written(self, fr: TGFSFileRef, fd: Optional[TGFSFileDesc]) -> None:
         if self._on_written is None:
@@ -323,8 +327,11 @@ class FileApi:
         messages the copy points at, so the moved file has to be relocated in
         the metadata instead.
         """
-        moved_fr = fr.location.relocate_file_ref(fr, where, name)
+        from_dir = fr.location
+        moved_fr = from_dir.relocate_file_ref(fr, where, name)
         await self._metadata_api.push()
+        self.stats.changed(from_dir, pushed=True)
+        self.stats.changed(where, pushed=True)
         return moved_fr
 
     async def _create_new_file(
@@ -358,13 +365,18 @@ class FileApi:
     async def _update_existing_file(
         self, fr: TGFSFileRef, file_msg: FileMessage, version_id: Optional[str]
     ) -> TGFSFileDesc:
-        if version_id:
-            resp = await self._file_desc_api.update_file_version(
-                fr, file_msg, version_id
-            )
-        else:
-            resp = await self._file_desc_api.append_file_version(file_msg, fr)
-        await self._sync_file_ref(fr, resp)
+        try:
+            if version_id:
+                resp = await self._file_desc_api.update_file_version(
+                    fr, file_msg, version_id
+                )
+            else:
+                resp = await self._file_desc_api.append_file_version(file_msg, fr)
+            await self._sync_file_ref(fr, resp)
+        finally:
+            # Also when the write failed halfway: the descriptor may have
+            # changed already.
+            self.stats.invalidate(fr)
         await self._written(fr, resp.fd)
         return resp.fd
 
@@ -376,8 +388,11 @@ class FileApi:
         WebDAV PROPPATCH after an upload; the descriptor message changes,
         the metadata only when the descriptor moved.
         """
-        resp = await self._file_desc_api.set_last_modified(fr, when)
-        await self._sync_file_ref(fr, resp)
+        try:
+            resp = await self._file_desc_api.set_last_modified(fr, when)
+            await self._sync_file_ref(fr, resp)
+        finally:
+            self.stats.invalidate(fr)
         return resp.fd
 
     async def rm(self, fr: TGFSFileRef, version_id: Optional[str] = None) -> None:
@@ -388,6 +403,7 @@ class FileApi:
             )
             fr.delete()
             await self._metadata_api.push()
+            self.stats.changed(fr.location, pushed=True)
             await self._message_api.delete_messages(message_ids)
             await self.delete_mirrored(mirror_ids)
             if version_ids:
@@ -396,8 +412,11 @@ class FileApi:
             message_ids, mirror_ids = await self._collect_version_message_ids(
                 fr, version_id
             )
-            resp = await self._file_desc_api.delete_file_version(fr, version_id)
-            await self._sync_file_ref(fr, resp)
+            try:
+                resp = await self._file_desc_api.delete_file_version(fr, version_id)
+                await self._sync_file_ref(fr, resp)
+            finally:
+                self.stats.invalidate(fr)
             await self._message_api.delete_messages(message_ids)
             await self.delete_mirrored(mirror_ids)
 

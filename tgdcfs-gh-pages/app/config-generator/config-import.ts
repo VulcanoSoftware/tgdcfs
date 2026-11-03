@@ -19,6 +19,8 @@ import {
   ConfigData,
   DiscordConfig,
   FilesystemConfig,
+  LISTING_DEFAULTS,
+  ListingConfig,
   MetadataType,
   MirrorMode,
   StoreConfig,
@@ -327,6 +329,25 @@ const readTransfer = (
   return transfer;
 };
 
+const readListing = (raw: unknown, notes: Notes): ListingConfig => {
+  if (!isMapping(raw)) return { ...LISTING_DEFAULTS };
+  notes.unknownKeys("tgdcfs.listing", raw, Object.keys(LISTING_DEFAULTS));
+  return {
+    stat_in_metadata: asBoolean(
+      raw.stat_in_metadata,
+      LISTING_DEFAULTS.stat_in_metadata
+    ),
+    validate_on_list: asBoolean(
+      raw.validate_on_list,
+      LISTING_DEFAULTS.validate_on_list
+    ),
+    message_cache_size: asNumber(
+      raw.message_cache_size,
+      LISTING_DEFAULTS.message_cache_size
+    ),
+  };
+};
+
 const readCache = (raw: unknown, notes: Notes): CacheConfig => {
   if (!isMapping(raw)) return { ...CACHE_DEFAULTS };
   notes.unknownKeys("tgdcfs.cache", raw, Object.keys(CACHE_DEFAULTS));
@@ -514,6 +535,7 @@ export const importConfig = (text: string): ImportedConfig => {
     "transfer",
     "encryption",
     "cache",
+    "listing",
     ...(legacyLayout ? ["metadata"] : []),
   ]);
   config.tgdcfs.users = readUsers(app.users, notes);
@@ -563,6 +585,7 @@ export const importConfig = (text: string): ImportedConfig => {
     notes
   );
   config.tgdcfs.cache = readCache(app.cache, notes);
+  config.tgdcfs.listing = readListing(app.listing, notes);
   config.tgdcfs.encryption = readEncryption(
     app.encryption,
     config.tgdcfs.encryption,
