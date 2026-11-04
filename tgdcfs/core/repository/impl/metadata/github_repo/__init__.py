@@ -152,7 +152,10 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
             # Paths and contents are fixed here, on the event loop; the
             # thread only talks to GitHub.
             writes = [(d.stats_path, content) for d, content in changes]
-            await asyncio.to_thread(self._commit_stats, writes)
+            # Same writer thread as the file references: both commit on the
+            # branch, and two at once is what made the stats ref update fail
+            # with "not a fast forward".
+            await self._ghc.write(self._commit_stats, writes)
             for directory, content in changes:
                 directory.stats_sha = None if content is None else _blob_sha(content)
                 directory.stats_loaded = True

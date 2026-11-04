@@ -51,6 +51,16 @@ the fact on the commits that shipped them.
 
 ### Fixed
 
+- Bulk uploads with a `github_repo` metadata store no longer freeze the whole
+  server. Every new file is one commit in the metadata repository, and
+  PyGithub made that call on the event loop. When GitHub throttled the
+  commits, the loop sat in PyGithub's rate-limit sleep for minutes: no
+  request was answered, the Discord heartbeat blocked, and FileZilla failed
+  files with "Connection timed out after 20 seconds of inactivity" (11 files
+  of a 20k-file test). Creating, deleting and moving file references now run
+  on a dedicated GitHub writer thread. It is a single thread because all
+  writes are commits on one branch, so the stats commit also stops losing
+  races against file commits ("Update is not a fast forward").
 - Uploads above 2 GB over WebDAV no longer time out between Telegram parts.
   A streamed file goes to Telegram in parts of up to 2000 MiB, and after
   each part Telegram can take a minute or more to turn it into a message.
