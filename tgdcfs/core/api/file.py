@@ -344,6 +344,7 @@ class FileApi:
         fr.mirrors = dict(resp.mirrors)
         fr.store = resp.store
         await self._metadata_api.push()
+        await self.stats.record(fr, resp.fd)
         await self._written(fr, resp.fd)
         return resp.fd
 

@@ -51,6 +51,18 @@ the fact on the commits that shipped them.
 
 ### Fixed
 
+- Listing a folder of freshly uploaded files no longer reads every file back
+  from the store. An upload did not keep the file's size and dates, so the
+  first PROPFIND of a 20k-file folder read 20k descriptors and 20k encryption
+  headers from Telegram (flood waits, about 45 minutes) and FileZilla gave up
+  after 20 seconds with "Failed to retrieve directory listing", every time.
+  The stat is now recorded when the file is written, the encryption header is
+  kept from the write, and both go into the stored stats like any other.
+  Folders uploaded by an earlier version are read once, as before.
+- A metadata repository too big for GitHub's recursive tree (100,000 entries
+  or 7 MB) is read one directory at a time with the tree API. It fell back to
+  the contents API, which stops at 1000 entries per directory, so a folder of
+  20k files came back with 1000 of them after a restart.
 - Bulk uploads with a `github_repo` metadata store no longer freeze the whole
   server. Every new file is one commit in the metadata repository, and
   PyGithub made that call on the event loop. When GitHub throttled the

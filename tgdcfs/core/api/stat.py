@@ -114,6 +114,28 @@ class FileStatApi:
             self._mark(fr.location)
         return stat
 
+    async def record(self, fr: TGFSFileRef, fd: TGFSFileDesc) -> None:
+        """A write just produced ``fd`` for ``fr``: keep its stat now.
+
+        Otherwise the first listing of the folder has to read the descriptor
+        of every file that was uploaded into it. For a folder of tens of
+        thousands of files that is tens of thousands of store reads inside
+        one PROPFIND, and the client gave up long before they were done.
+        Best effort: when the stat cannot be worked out here, the listing
+        reads it later as before.
+        """
+        if not self._persist:
+            return
+        epoch = fr.stat_epoch
+        try:
+            stat = await self.stat_of(fd)
+        except Exception as ex:
+            logger.debug(f"Could not work out the stat of {fr.name} yet: {ex}")
+            return
+        if fd.complete and fr.stat_epoch == epoch and _in_tree(fr):
+            fr.stat = stat
+            self._mark(fr.location)
+
     async def stat_of(self, fd: TGFSFileDesc) -> FileStat:
         fv = fd.get_latest_version()
         size = await self._file_desc_api.content_length(fv)
@@ -219,6 +241,7 @@ class FileStatApi:
         batch, self._dirty = self._dirty, {}
         self._dirty_since = None
         self._urgent = False
+        logger.info(f"Writing the file stats of {len(batch)} folder(s)")
         try:
             await self._metadata_api.save_stats(batch.values(), keep=self._persist)
             return True
