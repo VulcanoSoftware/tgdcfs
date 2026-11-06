@@ -51,6 +51,19 @@ the fact on the commits that shipped them.
 
 ### Fixed
 
+- Writing the stats of a big folder no longer starves the uploads into it.
+  With stats kept per upload the folder's stats (one blob of megabytes for
+  10k files) were committed every ~11 s on the same GitHub writer as the file
+  references: a commit took 6-10 s, so uploads slowed from 2 s to 4-19 s per
+  file and FileZilla gave up after 20 s with "Connection timed out after 20
+  seconds of inactivity" (11051 files in, at 02:45). Each failed transfer
+  then listed the folder again and the pile of PROPFINDs took the server
+  down. After a stats write the next waits ten times as long as it took, and
+  a listing reads at most 16 missing descriptors at once instead of
+  thousands.
+- A stat kept at upload no longer depends on the descriptor reading back as
+  complete (it was just written), and when one is skipped the first ones are
+  logged as "Did not keep the stat of ... on upload".
 - Listing a folder of freshly uploaded files no longer reads every file back
   from the store. An upload did not keep the file's size and dates, so the
   first PROPFIND of a 20k-file folder read 20k descriptors and 20k encryption

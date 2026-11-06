@@ -21,6 +21,17 @@ FLUSH_MAX_DELAY = 60.0
 # the stored one is out of date, and a crash would keep it that way.
 URGENT_QUIET = 1.0
 URGENT_MAX_DELAY = 5.0
+# A stats write takes as long as the whole folder's stats are big (seconds
+# for a folder of ten thousand files) and shares the metadata writer with
+# every file that is being uploaded. Writing again right after, as steady
+# marks from uploads would have it, left the uploads half the time: they went
+# from 2 s to 4-19 s each until FileZilla gave up after 20 s. So after a write
+# the next one waits FLUSH_DUTY times as long as the last one took.
+FLUSH_DUTY = 10.0
+# Descriptors read at once for the stats a listing is missing. A folder of
+# thousands of files without stored stats started that many reads in one
+# PROPFIND, which kept the event loop busy for tens of seconds.
+MAX_STAT_READS = 16
 # Pause before a failed write is tried again.
 FLUSH_RETRY_DELAY = 60.0
 # How long shutdown waits for the last write.
@@ -62,6 +73,10 @@ class FileStatApi:
         self._dirty: Dict[int, TGFSDirectory] = {}
         self._dirty_since: Optional[float] = None
         self._last_mark = 0.0
+        self._flush_cost = 0.0
+        self._last_flush_end = 0.0
+        self._records_skipped = 0
+        self._read_slots = asyncio.Semaphore(MAX_STAT_READS)
         self._urgent = False
         self._flusher: Optional[asyncio.Task[None]] = None
         self._wake = asyncio.Event()
@@ -105,8 +120,9 @@ class FileStatApi:
 
     async def _fill(self, fr: TGFSFileRef) -> FileStat:
         epoch = fr.stat_epoch
-        fd = await self._file_desc_api.get_file_desc(fr, validate=self._validate)
-        stat = await self.stat_of(fd)
+        async with self._read_slots:
+            fd = await self._file_desc_api.get_file_desc(fr, validate=self._validate)
+            stat = await self.stat_of(fd)
         # A descriptor that could not be read is served but never stored,
         # and neither is one read before the file changed.
         if fd.complete and fr.stat_epoch == epoch and _in_tree(fr):
@@ -130,11 +146,24 @@ class FileStatApi:
         try:
             stat = await self.stat_of(fd)
         except Exception as ex:
-            logger.debug(f"Could not work out the stat of {fr.name} yet: {ex}")
+            self._record_skipped(fr, f"its size could not be worked out: {ex}")
             return
-        if fd.complete and fr.stat_epoch == epoch and _in_tree(fr):
-            fr.stat = stat
-            self._mark(fr.location)
+        # ``fd`` was just written by this very call, so it is complete by
+        # construction; the checks left are for a change made meanwhile.
+        if fr.stat_epoch != epoch:
+            return
+        if not _in_tree(fr):
+            self._record_skipped(fr, "it is no longer in its folder")
+            return
+        fr.stat = stat
+        self._mark(fr.location)
+
+    def _record_skipped(self, fr: TGFSFileRef, why: str) -> None:
+        # Not an error (the listing reads the stat later), but it makes that
+        # listing slow, so the first ones are worth a line.
+        self._records_skipped += 1
+        if self._records_skipped <= 20:
+            logger.warning(f"Did not keep the stat of {fr.name} on upload: {why}")
 
     async def stat_of(self, fd: TGFSFileDesc) -> FileStat:
         fv = fd.get_latest_version()
@@ -209,7 +238,10 @@ class FileStatApi:
         )
         now = time.monotonic()
         since = self._dirty_since if self._dirty_since is not None else now
-        return max(0.0, min(self._last_mark + quiet, since + max_delay) - now)
+        due = min(self._last_mark + quiet, since + max_delay)
+        # Never again sooner than the last write's cost allows (see FLUSH_DUTY).
+        due = max(due, self._last_flush_end + FLUSH_DUTY * self._flush_cost)
+        return max(0.0, due - now)
 
     async def _run_flusher(self) -> None:
         """Write the marked folders whenever they are due, until none are
@@ -242,8 +274,11 @@ class FileStatApi:
         self._dirty_since = None
         self._urgent = False
         logger.info(f"Writing the file stats of {len(batch)} folder(s)")
+        started = time.monotonic()
         try:
             await self._metadata_api.save_stats(batch.values(), keep=self._persist)
+            self._last_flush_end = time.monotonic()
+            self._flush_cost = self._last_flush_end - started
             return True
         except Exception as ex:
             logger.warning(
