@@ -1,8 +1,12 @@
+import asyncio
 import datetime
 import logging
-from dataclasses import dataclass
-from typing import Optional
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from typing import Callable, Optional, TypeVar
 
+import requests
 from github import Github, InputGitTreeElement
 from github.Repository import Repository
 
@@ -14,6 +18,20 @@ from .dir_timestamps import DirTimestampStore
 from .stats_file import STATS_FILE_NAME
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+# A dropped connection (GitHub or the network hiccups for a few seconds) is
+# tried again briefly; a WebDAV client gives up after about 20 s.
+PUT_ATTEMPTS = 3
+PUT_RETRY_DELAY = 1.5
+
+
+def _is_transient(ex: Exception) -> bool:
+    status = getattr(ex, "status", None)
+    if status is not None:
+        return status >= 500
+    return isinstance(ex, (requests.exceptions.RequestException, OSError))
 
 
 @dataclass
@@ -28,6 +46,24 @@ class GithubConfig:
     # Where the directory dates come from. ``None`` leaves every loaded
     # directory on the ``now()`` default, as it was before the cache existed.
     timestamps: Optional[DirTimestampStore] = None
+    # PyGithub is synchronous: a write sleeps through GitHub's rate limits
+    # and retries for as long as it takes, and on the event loop that froze
+    # every other request (uploads timed out in FileZilla after 20 s of
+    # silence while a 20k-file upload was throttled). The writes run on this
+    # one thread instead. One thread, because every write is a commit on the
+    # same branch: two at once only race each other into 409/422 conflicts.
+    writer: ThreadPoolExecutor = field(
+        default_factory=lambda: ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="github-writes"
+        ),
+        compare=False,
+        repr=False,
+    )
+
+    async def write(self, fn: Callable[..., T], *args) -> T:
+        """Run the blocking GitHub write ``fn`` off the event loop, after
+        the writes queued before it."""
+        return await asyncio.get_running_loop().run_in_executor(self.writer, fn, *args)
 
 
 class GithubDirectory(TGFSDirectory):
@@ -301,31 +337,76 @@ class GithubDirectory(TGFSDirectory):
 
     def create_file_ref(self, name: str, file_message_id: int) -> TGFSFileRef:
         file_ref = super().create_file_ref(name, file_message_id)
+        try:
+            self._put_file_ref(name, file_message_id)
+        except Exception:
+            self.files.remove(file_ref)
+            raise
+        return file_ref
 
-        # Create file reference in GitHub (filename encrypted when keyed)
+    async def create_file_ref_async(
+        self, name: str, file_message_id: int
+    ) -> TGFSFileRef:
+        # The in-memory tree is only ever touched on the event loop; just
+        # the GitHub call goes to the writer thread.
+        file_ref = super().create_file_ref(name, file_message_id)
+        try:
+            await self._ghc.write(self._put_file_ref, name, file_message_id)
+        except Exception:
+            self.files.remove(file_ref)
+            raise
+        return file_ref
+
+    def _put_file_ref(self, name: str, file_message_id: int) -> None:
+        """Create the file reference blob in the repo (filename encrypted
+        when keyed). Blocking; raises when GitHub refuses."""
         file_path = self.join_path(
             self._github_path, self._file_ref_storage_name(name, file_message_id)
         )
-        try:
-            self._ghc.repo.create_file(
-                path=file_path,
-                message=f"Create file reference for {self._message_name(name)}",
-                content="",
-                branch=self._ghc.commit,
-            )
-            logger.info(
-                f"Created file reference {name} in {self._ghc.repo_name} at {file_path}"
-            )
-        except Exception as ex:
-            logger.error(
-                f"Failed to create file reference {name} in {self._ghc.repo_name}: {ex}"
-            )
-            self.files.remove(file_ref)
-            raise
-
-        return file_ref
+        for attempt in range(PUT_ATTEMPTS):
+            try:
+                self._ghc.repo.create_file(
+                    path=file_path,
+                    message=f"Create file reference for {self._message_name(name)}",
+                    content="",
+                    branch=self._ghc.commit,
+                )
+                logger.info(
+                    f"Created file reference {name} in {self._ghc.repo_name} "
+                    f"at {file_path}"
+                )
+                return
+            except Exception as ex:
+                if attempt > 0 and getattr(ex, "status", None) == 422:
+                    # An earlier attempt got through although its answer was
+                    # lost: the blob is there.
+                    logger.info(
+                        f"Created file reference {name} in {self._ghc.repo_name} "
+                        f"at {file_path} (an earlier attempt landed)"
+                    )
+                    return
+                if attempt == PUT_ATTEMPTS - 1 or not _is_transient(ex):
+                    logger.error(
+                        f"Failed to create file reference {name} in "
+                        f"{self._ghc.repo_name}: {ex}"
+                    )
+                    raise
+                logger.warning(
+                    f"Creating file reference {name} failed ({ex}); trying again"
+                )
+                time.sleep(PUT_RETRY_DELAY * (attempt + 1))
 
     def delete_file_ref(self, fr: TGFSFileRef) -> None:
+        self._drop_file_ref(fr)
+        super().delete_file_ref(fr)
+
+    async def delete_file_ref_async(self, fr: TGFSFileRef) -> None:
+        await self._ghc.write(self._drop_file_ref, fr)
+        super().delete_file_ref(fr)
+
+    def _drop_file_ref(self, fr: TGFSFileRef) -> None:
+        """Remove the file reference blob from the repo. Blocking; a blob
+        that cannot be found is logged, not raised."""
         # The ref may be stored under its encrypted or its legacy-plaintext
         # name (mixed repos), so try the encrypted form first, then plaintext.
         candidates = []
@@ -363,8 +444,6 @@ class GithubDirectory(TGFSDirectory):
                 f"Failed to delete file reference {fr.name} "
                 f"from {self._ghc.repo_name}: not found"
             )
-
-        super().delete_file_ref(fr)
 
     def _delete_github_directory(self) -> None:
         """Remove this directory and everything beneath it in one commit.

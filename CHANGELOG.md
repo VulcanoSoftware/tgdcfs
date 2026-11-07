@@ -51,6 +51,50 @@ the fact on the commits that shipped them.
 
 ### Fixed
 
+- Uploaded files lost their stored size and dates again right after the
+  upload: WebDAV clients such as FileZilla set the modification time with a
+  PROPPATCH after every PUT, and that dropped the stat that had just been
+  recorded. The first listing of the folder then read the descriptor of every
+  file (thousands of store reads, a client timeout). A changed file now gets
+  its new stat straight away, and without forcing an extra stats commit.
+- A dropped connection to GitHub while creating a file reference (for
+  example "Max retries exceeded") is tried again twice before the upload
+  fails, instead of ending the upload with a server error.
+- Writing the stats of a big folder no longer starves the uploads into it.
+  With stats kept per upload the folder's stats (one blob of megabytes for
+  10k files) were committed every ~11 s on the same GitHub writer as the file
+  references: a commit took 6-10 s, so uploads slowed from 2 s to 4-19 s per
+  file and FileZilla gave up after 20 s with "Connection timed out after 20
+  seconds of inactivity" (11051 files in, at 02:45). Each failed transfer
+  then listed the folder again and the pile of PROPFINDs took the server
+  down. After a stats write the next waits ten times as long as it took, and
+  a listing reads at most 16 missing descriptors at once instead of
+  thousands.
+- A stat kept at upload no longer depends on the descriptor reading back as
+  complete (it was just written), and when one is skipped the first ones are
+  logged as "Did not keep the stat of ... on upload".
+- Listing a folder of freshly uploaded files no longer reads every file back
+  from the store. An upload did not keep the file's size and dates, so the
+  first PROPFIND of a 20k-file folder read 20k descriptors and 20k encryption
+  headers from Telegram (flood waits, about 45 minutes) and FileZilla gave up
+  after 20 seconds with "Failed to retrieve directory listing", every time.
+  The stat is now recorded when the file is written, the encryption header is
+  kept from the write, and both go into the stored stats like any other.
+  Folders uploaded by an earlier version are read once, as before.
+- A metadata repository too big for GitHub's recursive tree (100,000 entries
+  or 7 MB) is read one directory at a time with the tree API. It fell back to
+  the contents API, which stops at 1000 entries per directory, so a folder of
+  20k files came back with 1000 of them after a restart.
+- Bulk uploads with a `github_repo` metadata store no longer freeze the whole
+  server. Every new file is one commit in the metadata repository, and
+  PyGithub made that call on the event loop. When GitHub throttled the
+  commits, the loop sat in PyGithub's rate-limit sleep for minutes: no
+  request was answered, the Discord heartbeat blocked, and FileZilla failed
+  files with "Connection timed out after 20 seconds of inactivity" (11 files
+  of a 20k-file test). Creating, deleting and moving file references now run
+  on a dedicated GitHub writer thread. It is a single thread because all
+  writes are commits on one branch, so the stats commit also stops losing
+  races against file commits ("Update is not a fast forward").
 - Uploads above 2 GB over WebDAV no longer time out between Telegram parts.
   A streamed file goes to Telegram in parts of up to 2000 MiB, and after
   each part Telegram can take a minute or more to turn it into a message.

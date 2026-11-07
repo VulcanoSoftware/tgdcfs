@@ -337,7 +337,7 @@ class TestFileApi:
         sample_file_ref,
         mocker,
     ):
-        sample_file_ref.delete = mocker.Mock()
+        sample_file_ref.delete_async = mocker.AsyncMock()
 
         fd = mocker.Mock(spec=TGFSFileDesc)
         fd.get_versions.return_value = [
@@ -351,7 +351,7 @@ class TestFileApi:
 
         await file_api.rm(sample_file_ref)
 
-        sample_file_ref.delete.assert_called_once()
+        sample_file_ref.delete_async.assert_awaited_once()
         mock_metadata_api.push.assert_called_once()
         mock_message_api.delete_messages.assert_called_once()
         deleted_ids = mock_message_api.delete_messages.call_args[0][0]

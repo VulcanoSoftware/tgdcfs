@@ -286,7 +286,9 @@ class FileApi:
         resp: Optional[FDRepositoryResp] = None
         try:
             resp = await self._file_desc_api.save_new_file_desc(copied_fd)
-            copied_fr = where.create_file_ref(name or fr.name, resp.message_id)
+            copied_fr = await where.create_file_ref_async(
+                name or fr.name, resp.message_id
+            )
         except Exception:
             await self._discard_orphans(copied_fd, resp)
             raise
@@ -328,7 +330,7 @@ class FileApi:
         the metadata instead.
         """
         from_dir = fr.location
-        moved_fr = from_dir.relocate_file_ref(fr, where, name)
+        moved_fr = await from_dir.relocate_file_ref_async(fr, where, name)
         await self._metadata_api.push()
         self.stats.changed(from_dir, pushed=True)
         self.stats.changed(where, pushed=True)
@@ -338,10 +340,11 @@ class FileApi:
         self, where: TGFSDirectory, file_msg: FileMessage
     ) -> TGFSFileDesc:
         resp = await self._file_desc_api.create_file_desc(file_msg)
-        fr = where.create_file_ref(file_msg.name, resp.message_id)
+        fr = await where.create_file_ref_async(file_msg.name, resp.message_id)
         fr.mirrors = dict(resp.mirrors)
         fr.store = resp.store
         await self._metadata_api.push()
+        await self.stats.record(fr, resp.fd)
         await self._written(fr, resp.fd)
         return resp.fd
 
@@ -373,10 +376,12 @@ class FileApi:
             else:
                 resp = await self._file_desc_api.append_file_version(file_msg, fr)
             await self._sync_file_ref(fr, resp)
-        finally:
+        except BaseException:
             # Also when the write failed halfway: the descriptor may have
             # changed already.
             self.stats.invalidate(fr)
+            raise
+        await self.stats.refresh(fr, resp.fd)
         await self._written(fr, resp.fd)
         return resp.fd
 
@@ -391,8 +396,10 @@ class FileApi:
         try:
             resp = await self._file_desc_api.set_last_modified(fr, when)
             await self._sync_file_ref(fr, resp)
-        finally:
+        except BaseException:
             self.stats.invalidate(fr)
+            raise
+        await self.stats.refresh(fr, resp.fd)
         return resp.fd
 
     async def rm(self, fr: TGFSFileRef, version_id: Optional[str] = None) -> None:
@@ -401,7 +408,7 @@ class FileApi:
             message_ids, mirror_ids = await self.collect_deletable_message_ids(
                 [fr], version_ids
             )
-            fr.delete()
+            await fr.delete_async()
             await self._metadata_api.push()
             self.stats.changed(fr.location, pushed=True)
             await self._message_api.delete_messages(message_ids)

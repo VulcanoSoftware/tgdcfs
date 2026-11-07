@@ -126,6 +126,7 @@ class EncryptingFileContentRepository(IFileContentRepository):
         # ciphertext stream.
         header = FileHeader.new(chunk_size=self._chunk_size)
         file_key = derive_file_key(self._master_key, header.file_salt)
+        self._remember_header(file_msg, header, file_key)
         encrypted = EncryptingFileMessage.wrap(file_msg, file_key, header)
         # The cache below stages ciphertext under the version's id.
         encrypted.version_id = file_msg.version_id
@@ -138,6 +139,19 @@ class EncryptingFileContentRepository(IFileContentRepository):
         )
         return await self._inner.save(encrypted)
 
+    def _remember_header(
+        self, file_msg: UploadableFileMessage, header: FileHeader, file_key: bytes
+    ) -> None:
+        """Keep the header of a file being written under its version id.
+
+        Its size on a listing comes from this header. Without it, the first
+        listing of a folder of freshly uploaded files probed the start of
+        every one of them from the store: for 20k files that is 20k reads,
+        which Telegram answered with flood waits for tens of minutes.
+        """
+        if file_msg.version_id:
+            self._cache.put(file_msg.version_id, (header, file_key))
+
     async def stage(
         self, file_msg: UploadableFileMessage, version_id: str
     ) -> Optional[int]:
@@ -146,6 +160,7 @@ class EncryptingFileContentRepository(IFileContentRepository):
             file_msg.name = encrypt_name(self._name_key, file_msg.name)
         header = FileHeader.new(chunk_size=self._chunk_size)
         file_key = derive_file_key(self._master_key, header.file_salt)
+        self._remember_header(file_msg, header, file_key)
         encrypted = EncryptingFileMessage.wrap(file_msg, file_key, header)
         encrypted.version_id = version_id
         return await self._inner.stage(encrypted, version_id)
