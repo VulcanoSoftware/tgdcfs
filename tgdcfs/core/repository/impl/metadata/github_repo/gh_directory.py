@@ -1,10 +1,12 @@
 import asyncio
 import datetime
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable, Optional, TypeVar
 
+import requests
 from github import Github, InputGitTreeElement
 from github.Repository import Repository
 
@@ -18,6 +20,18 @@ from .stats_file import STATS_FILE_NAME
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+# A dropped connection (GitHub or the network hiccups for a few seconds) is
+# tried again briefly; a WebDAV client gives up after about 20 s.
+PUT_ATTEMPTS = 3
+PUT_RETRY_DELAY = 1.5
+
+
+def _is_transient(ex: Exception) -> bool:
+    status = getattr(ex, "status", None)
+    if status is not None:
+        return status >= 500
+    return isinstance(ex, (requests.exceptions.RequestException, OSError))
 
 
 @dataclass
@@ -349,21 +363,38 @@ class GithubDirectory(TGFSDirectory):
         file_path = self.join_path(
             self._github_path, self._file_ref_storage_name(name, file_message_id)
         )
-        try:
-            self._ghc.repo.create_file(
-                path=file_path,
-                message=f"Create file reference for {self._message_name(name)}",
-                content="",
-                branch=self._ghc.commit,
-            )
-            logger.info(
-                f"Created file reference {name} in {self._ghc.repo_name} at {file_path}"
-            )
-        except Exception as ex:
-            logger.error(
-                f"Failed to create file reference {name} in {self._ghc.repo_name}: {ex}"
-            )
-            raise
+        for attempt in range(PUT_ATTEMPTS):
+            try:
+                self._ghc.repo.create_file(
+                    path=file_path,
+                    message=f"Create file reference for {self._message_name(name)}",
+                    content="",
+                    branch=self._ghc.commit,
+                )
+                logger.info(
+                    f"Created file reference {name} in {self._ghc.repo_name} "
+                    f"at {file_path}"
+                )
+                return
+            except Exception as ex:
+                if attempt > 0 and getattr(ex, "status", None) == 422:
+                    # An earlier attempt got through although its answer was
+                    # lost: the blob is there.
+                    logger.info(
+                        f"Created file reference {name} in {self._ghc.repo_name} "
+                        f"at {file_path} (an earlier attempt landed)"
+                    )
+                    return
+                if attempt == PUT_ATTEMPTS - 1 or not _is_transient(ex):
+                    logger.error(
+                        f"Failed to create file reference {name} in "
+                        f"{self._ghc.repo_name}: {ex}"
+                    )
+                    raise
+                logger.warning(
+                    f"Creating file reference {name} failed ({ex}); trying again"
+                )
+                time.sleep(PUT_RETRY_DELAY * (attempt + 1))
 
     def delete_file_ref(self, fr: TGFSFileRef) -> None:
         self._drop_file_ref(fr)

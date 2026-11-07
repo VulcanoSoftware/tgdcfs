@@ -319,16 +319,17 @@ class TestWriteLoad:
 
 class TestChanges:
     @pytest.mark.asyncio
-    async def test_an_overwrite_drops_the_stat(self, client, ops):
+    async def test_an_overwrite_replaces_the_stat(self, client, ops):
         await ops.upload_from_bytes(b"x" * 10, "/a.txt")
         fr = ops.stat_file("/a.txt")
-        fr.stat = None  # an upload records it; start from a ref without one
-        await client.stats.get(fr)
 
         await ops.upload_from_bytes(b"y" * 20, "/a.txt")
 
-        assert fr.stat is None
+        # Kept up to date, so a listing does not have to read the descriptor.
+        assert fr.stat is not None and fr.stat.size == 20
+        reads = client.fd_repo.reads
         assert (await client.stats.get(fr)).size == 20
+        assert client.fd_repo.reads == reads
 
     @pytest.mark.asyncio
     async def test_a_read_from_before_the_overwrite_is_not_stored(self, client, ops):
@@ -348,17 +349,19 @@ class TestChanges:
         assert fr.stat is None
 
     @pytest.mark.asyncio
-    async def test_a_new_date_drops_the_stat(self, client, ops):
+    async def test_a_new_date_replaces_the_stat(self, client, ops):
         import datetime
 
         await ops.upload_from_bytes(b"x" * 10, "/a.txt")
         fr = ops.stat_file("/a.txt")
-        fr.stat = None  # an upload records it; start from a ref without one
-        await client.stats.get(fr)
 
+        # FileZilla: PUT, then PROPPATCH. The stat must survive the second.
         await ops.set_last_modified("/a.txt", datetime.datetime(2020, 1, 1))
 
-        assert fr.stat is None
+        assert fr.stat is not None and fr.stat.size == 10
+        reads = client.fd_repo.reads
+        await client.stats.get(fr)
+        assert client.fd_repo.reads == reads
 
     @pytest.mark.asyncio
     async def test_a_move_keeps_the_stat(self, client, ops):

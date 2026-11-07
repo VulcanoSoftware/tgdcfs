@@ -376,10 +376,12 @@ class FileApi:
             else:
                 resp = await self._file_desc_api.append_file_version(file_msg, fr)
             await self._sync_file_ref(fr, resp)
-        finally:
+        except BaseException:
             # Also when the write failed halfway: the descriptor may have
             # changed already.
             self.stats.invalidate(fr)
+            raise
+        await self.stats.refresh(fr, resp.fd)
         await self._written(fr, resp.fd)
         return resp.fd
 
@@ -394,8 +396,10 @@ class FileApi:
         try:
             resp = await self._file_desc_api.set_last_modified(fr, when)
             await self._sync_file_ref(fr, resp)
-        finally:
+        except BaseException:
             self.stats.invalidate(fr)
+            raise
+        await self.stats.refresh(fr, resp.fd)
         return resp.fd
 
     async def rm(self, fr: TGFSFileRef, version_id: Optional[str] = None) -> None:

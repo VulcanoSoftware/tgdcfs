@@ -187,3 +187,50 @@ class TestPlainDirectoryAsync:
 
         await b.delete_file_ref_async(moved)
         assert not b.files
+
+
+class TestPutRetries:
+    @pytest.fixture(autouse=True)
+    def _no_delay(self, monkeypatch):
+        from tgdcfs.core.repository.impl.metadata.github_repo import gh_directory
+
+        monkeypatch.setattr(gh_directory, "PUT_RETRY_DELAY", 0)
+
+    @staticmethod
+    def _outcomes(ghc, names):
+        import requests
+        from github import GithubException
+
+        table = {
+            "conn": requests.exceptions.ConnectionError("Max retries"),
+            "422": GithubException(422, {}, {}),
+            "500": GithubException(500, {}, {}),
+            "404": GithubException(404, {}, {}),
+            "ok": None,
+        }
+        ghc.repo.create_file.side_effect = [table[n] for n in names]
+
+    def test_a_dropped_connection_is_retried(self, ghc):
+        self._outcomes(ghc, ["conn", "ok"])
+        GithubDirectory(ghc, "d", None)._put_file_ref("a", 1)
+        assert ghc.repo.create_file.call_count == 2
+
+    def test_an_attempt_that_landed_is_not_an_error(self, ghc):
+        self._outcomes(ghc, ["conn", "422"])
+        GithubDirectory(ghc, "d", None)._put_file_ref("a", 1)
+
+    def test_a_refusal_is_not_retried(self, ghc):
+        from github import GithubException
+
+        self._outcomes(ghc, ["404"])
+        with pytest.raises(GithubException):
+            GithubDirectory(ghc, "d", None)._put_file_ref("a", 1)
+        assert ghc.repo.create_file.call_count == 1
+
+    def test_gives_up_after_the_attempts(self, ghc):
+        from github import GithubException
+
+        self._outcomes(ghc, ["500", "500", "500"])
+        with pytest.raises(GithubException):
+            GithubDirectory(ghc, "d", None)._put_file_ref("a", 1)
+        assert ghc.repo.create_file.call_count == 3

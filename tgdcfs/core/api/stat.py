@@ -197,6 +197,29 @@ class FileStatApi:
         fr.stat = None
         self.changed(fr.location, pushed)
 
+    async def refresh(self, fr: TGFSFileRef, fd: TGFSFileDesc) -> None:
+        """``fr`` changed and the write just produced ``fd``: replace its stat.
+
+        FileZilla sets the modification time of every upload with a PROPPATCH
+        right after the PUT. Dropping the stat there left each uploaded file
+        without one, and the first listing read all their descriptors.
+        """
+        if not self._persist:
+            self.invalidate(fr)
+            return
+        fr.stat_epoch += 1
+        epoch = fr.stat_epoch
+        try:
+            stat = await self.stat_of(fd)
+        except Exception as ex:
+            self.invalidate(fr)
+            self._record_skipped(fr, f"its size could not be worked out: {ex}")
+            return
+        if fr.stat_epoch != epoch or not _in_tree(fr):
+            return
+        fr.stat = stat
+        self._mark(fr.location)
+
     def changed(self, directory: TGFSDirectory, pushed: bool = False) -> None:
         """The set of files in ``directory`` changed (a file was added,
         removed or moved), so its stored stats need rewriting."""

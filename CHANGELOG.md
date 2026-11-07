@@ -51,6 +51,15 @@ the fact on the commits that shipped them.
 
 ### Fixed
 
+- Uploaded files lost their stored size and dates again right after the
+  upload: WebDAV clients such as FileZilla set the modification time with a
+  PROPPATCH after every PUT, and that dropped the stat that had just been
+  recorded. The first listing of the folder then read the descriptor of every
+  file (thousands of store reads, a client timeout). A changed file now gets
+  its new stat straight away, and without forcing an extra stats commit.
+- A dropped connection to GitHub while creating a file reference (for
+  example "Max retries exceeded") is tried again twice before the upload
+  fails, instead of ending the upload with a server error.
 - Writing the stats of a big folder no longer starves the uploads into it.
   With stats kept per upload the folder's stats (one blob of megabytes for
   10k files) were committed every ~11 s on the same GitHub writer as the file
