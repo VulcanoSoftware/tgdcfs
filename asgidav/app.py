@@ -261,10 +261,17 @@ def create_app(
 
         return NOT_FOUND
 
+    async def _discard_empty(member: Resource, path: str) -> None:
+        try:
+            await member.remove()
+        except Exception as ex:
+            logger.warning(f"Could not remove the unfinished upload {path}: {ex}")
+
     @app.put("/{path:path}")
     async def put(request: Request, path: str):
         content_length = request.headers.get("Content-Length", "0")
         size = int(content_length)
+        created = False
         if not (member := await get_member(path)):
             parent_path, _ = split_path(path)
             if not isinstance(await get_member(parent_path), Folder):
@@ -275,9 +282,19 @@ def create_app(
                 member = await (await root()).create_empty_resource(path)
             except NotImplementedError as e:
                 return FORBIDDEN(f"Cannot create {path}: {e}")
+            created = True
         if isinstance(member, Resource):
             if size > 0:
-                await member.overwrite(request.stream(), size=size)
+                try:
+                    await member.overwrite(request.stream(), size=size)
+                except BaseException:
+                    # The client gave up (timeout, reset) or the write
+                    # failed: do not leave the empty file this request
+                    # created behind. Clients list it as an existing 0 B
+                    # file and ask to overwrite it on every retry.
+                    if created:
+                        await asyncio.shield(_discard_empty(member, path))
+                    raise
             return CREATED
         return CONFLICT("Cannot PUT to a directory")
 

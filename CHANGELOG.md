@@ -51,6 +51,10 @@ the fact on the commits that shipped them.
 
 ### Fixed
 
+- An upload that fails or is cut off (client timeout, reset connection) no
+  longer leaves the empty file behind that the PUT creates first. FileZilla
+  listed it as an existing 0 B file and asked "Target file already exists" on
+  every retry.
 - Uploaded files lost their stored size and dates again right after the
   upload: WebDAV clients such as FileZilla set the modification time with a
   PROPPATCH after every PUT, and that dropped the stat that had just been
