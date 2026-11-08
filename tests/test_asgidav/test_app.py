@@ -141,7 +141,7 @@ class TestUnfinishedUploadIsDiscarded:
 
     async def _put(self, fail_with):
         removed = []
-        state = {"created": None}
+        state: dict = {"created": None}
 
         class Res(MockResource):
             async def overwrite(self, content, size):
