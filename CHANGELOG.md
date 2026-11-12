@@ -42,6 +42,17 @@ the fact on the commits that shipped them.
 
 ### Changed
 
+- SFTP uploads stream into Telegram and Discord as the data arrives instead
+  of being buffered whole first. SFTP does not announce the file size up
+  front, so the Telegram store now uses the streamed-upload protocol
+  (`upload.saveBigFilePart` with `file_total_parts = -1` per part, the real
+  total only on the last part), and large files are sent as ≤ 2 GB document
+  parts by the bot without needing a premium account. Writes that run ahead
+  of the upload are buffered up to `upload_buffer_size_mb`; a client that
+  rewrites an earlier part of the file before anything has been streamed
+  falls back to the old spool path, and a backwards write after streaming
+  has started is rejected.
+
 - WebDAV listings report a file's creation date as the date of its oldest
   version. It used to be the time of the listing.
 

@@ -23,6 +23,7 @@ import logging
 from dataclasses import dataclass, field
 
 from tgdcfs.crypto.cipher import (
+    CHUNK_OVERHEAD,
     ChunkedAESGCM,
     ciphertext_size_for_plaintext,
 )
@@ -77,9 +78,15 @@ class EncryptingFileMessage(UploadableFileMessage):
             raise RuntimeError("serialized header has unexpected size")
 
         plaintext_size = inner.get_size()
-        ciphertext_size = HEADER_SIZE + ciphertext_size_for_plaintext(
-            plaintext_size, header.chunk_size
-        )
+        if plaintext_size < 0:
+            # A live stream of unknown length: the ciphertext size is
+            # unknown too and only settles when the stream ends, so pass
+            # the unknown marker on for the streamed upload protocol.
+            ciphertext_size = -1
+        else:
+            ciphertext_size = HEADER_SIZE + ciphertext_size_for_plaintext(
+                plaintext_size, header.chunk_size
+            )
 
         msg = cls(
             name=inner.name,
@@ -134,7 +141,15 @@ class EncryptingFileMessage(UploadableFileMessage):
             # Refill the pending buffer with the next encrypted chunk.
             plaintext_chunk = await self._read_plaintext_chunk()
             if not plaintext_chunk:
-                # End of plaintext -- nothing more to emit.
+                # End of plaintext -- nothing more to emit. When the size
+                # was unknown up front, it settles here now that the
+                # stream has ended.
+                if self.size < 0:
+                    self.size = (
+                        HEADER_SIZE
+                        + self._plaintext_read
+                        + (self._chunk_index * CHUNK_OVERHEAD)
+                    )
                 break
 
             encrypted = self.cipher.encrypt_chunk(plaintext_chunk, self._chunk_index)
@@ -147,15 +162,17 @@ class EncryptingFileMessage(UploadableFileMessage):
         """Read exactly one plaintext crypto-chunk from the inner message.
 
         Loops in case the inner ``read`` returns short, which is allowed by
-        the protocol (FileMessageFromStream in particular may do so).
+        the protocol (FileMessageFromStream in particular may do so). An
+        inner message of unknown size (``-1``) is read until it returns
+        nothing; its total is only known once it ends.
         """
         target = self.cipher.chunk_size
         buf = bytearray()
         remaining_plaintext = self.inner.get_size() - self._plaintext_read
-        if remaining_plaintext <= 0:
+        if remaining_plaintext == 0:
             return b""
 
-        want = min(target, remaining_plaintext)
+        want = target if remaining_plaintext < 0 else min(target, remaining_plaintext)
         while len(buf) < want:
             piece = await self.inner.read(want - len(buf))
             if not piece:

@@ -4,21 +4,24 @@ from typing import AsyncIterator
 
 import pytest
 
+from tgdcfs.backends.telegram.interface import ITDLibClient
 from tgdcfs.backends.telegram.uploader import (
     MAX_PART_ATTEMPTS,
     FileChunk,
-    WorkersConfig,
     FileUploader,
+    WorkersConfig,
 )
+from tgdcfs.errors import TechnicalError
 from tgdcfs.reqres import (
     FileMessageFromBuffer,
     FileMessageFromPath,
     FileMessageFromStream,
     SaveFilePartResp,
+    SendFileReq,
     SendMessageResp,
+    UploadedFile,
 )
 from tgdcfs.tasks.integrations import TaskTracker
-from tgdcfs.backends.telegram.interface import ITDLibClient, TDLibApi
 
 
 @pytest.fixture
@@ -444,3 +447,156 @@ class TestConcurrencyAndWorkers:
         assert uploaded_size == len(test_data)
         # Should have made multiple calls due to chunking
         assert mock_client.save_file_part.call_count > 1
+
+
+class TestStreamedUpload:
+    """Uploads of unknown length, per core.telegram.org/api/files.
+
+    The protocol: buffer part_size bytes -- or less when the stream ends --
+    and upload immediately, always through upload.saveBigFilePart, with
+    ``file_total_parts = -1`` everywhere except the last part, which
+    carries ``ceil(total/part_size)`` and may be empty when the stream ends
+    exactly on a part boundary.
+    """
+
+    PART = 512 * 1024
+
+    @pytest.fixture
+    def mock_client(self, mocker):
+        client = mocker.AsyncMock(spec=ITDLibClient)
+        client.save_file_part = mocker.AsyncMock(
+            return_value=SaveFilePartResp(success=True)
+        )
+        client.save_big_file_part = mocker.AsyncMock(
+            return_value=SaveFilePartResp(success=True)
+        )
+        client.send_small_file = mocker.AsyncMock(
+            return_value=SendMessageResp(message_id=1)
+        )
+        client.send_big_file = mocker.AsyncMock(
+            return_value=SendMessageResp(message_id=2)
+        )
+        return client
+
+    @staticmethod
+    async def stream_of(chunks: list[bytes]) -> AsyncIterator[bytes]:
+        for chunk in chunks:
+            yield chunk
+
+    def reqs(self, mock_client):
+        return [call.args[0] for call in mock_client.save_big_file_part.call_args_list]
+
+    def totals(self, mock_client):
+        return [req.file_total_parts for req in self.reqs(mock_client)]
+
+    @pytest.mark.asyncio
+    async def test_small_stream_still_uses_big_file_parts(self, mock_client):
+        content = b"small stream"
+
+        uploader = FileUploader(
+            client=mock_client,
+            file_msg=FileMessageFromStream.new(
+                stream=self.stream_of([content]), size=-1, name="small.bin"
+            ),
+        )
+        assert await uploader.upload() == len(content)
+
+        assert mock_client.save_file_part.await_count == 0
+        assert self.totals(mock_client) == [1]
+        assert uploader.get_uploaded_file().parts == 1
+
+    @pytest.mark.asyncio
+    async def test_parts_stream_out_with_minus_one_total(self, mock_client):
+        content = b"x" * (2 * self.PART + 100)
+
+        uploader = FileUploader(
+            client=mock_client,
+            file_msg=FileMessageFromStream.new(
+                stream=self.stream_of([content[: self.PART], content[self.PART :]]),
+                size=-1,
+            ),
+        )
+        assert await uploader.upload() == len(content)
+
+        assert self.totals(mock_client) == [-1, -1, 3]
+        assert [len(req.bytes) for req in self.reqs(mock_client)] == [
+            self.PART,
+            self.PART,
+            100,
+        ]
+        assert uploader.get_uploaded_file().parts == 3
+
+    @pytest.mark.asyncio
+    async def test_stream_ending_on_a_part_boundary_uploads_an_empty_last_part(
+        self, mock_client
+    ):
+        content = b"x" * (2 * self.PART)
+
+        uploader = FileUploader(
+            client=mock_client,
+            file_msg=FileMessageFromStream.new(
+                stream=self.stream_of([content]), size=-1
+            ),
+        )
+        assert await uploader.upload() == len(content)
+
+        assert self.totals(mock_client) == [-1, -1, 2]
+        last = self.reqs(mock_client)[-1]
+        assert last.bytes == b""
+        assert last.file_part == 2
+        assert uploader.get_uploaded_file().parts == 2
+
+    @pytest.mark.asyncio
+    async def test_empty_stream_uploads_nothing(self, mock_client):
+        uploader = FileUploader(
+            client=mock_client,
+            file_msg=FileMessageFromStream.new(stream=self.stream_of([]), size=-1),
+        )
+        assert await uploader.upload() == 0
+
+        assert mock_client.save_big_file_part.await_count == 0
+        assert mock_client.save_file_part.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_send_uses_the_big_file_constructor(self, mock_client):
+        content = b"x" * (self.PART + 1)
+
+        uploader = FileUploader(
+            client=mock_client,
+            file_msg=FileMessageFromStream.new(
+                stream=self.stream_of([content]), size=-1
+            ),
+        )
+        await uploader.upload()
+        await uploader.send(12345)
+
+        mock_client.send_big_file.assert_awaited_once_with(
+            SendFileReq(
+                chat=12345,
+                file=UploadedFile(
+                    id=uploader.get_uploaded_file().id, parts=2, name="unnamed"
+                ),
+                name="unnamed",
+                caption="",
+            )
+        )
+        mock_client.send_small_file.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_failing_part_aborts_the_upload(
+        self, mock_client, no_backoff, mocker
+    ):
+        content = b"x" * (2 * self.PART)
+        mock_client.save_big_file_part = mocker.AsyncMock(
+            side_effect=TechnicalError("part refused")
+        )
+
+        uploader = FileUploader(
+            client=mock_client,
+            file_msg=FileMessageFromStream.new(
+                stream=self.stream_of([content]), size=-1
+            ),
+        )
+
+        with pytest.raises(TechnicalError):
+            await uploader.upload()

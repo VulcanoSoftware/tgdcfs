@@ -102,6 +102,15 @@ MAX_READAHEAD_TASKS = 4
 # arrive as a chunk. Used only to turn a byte budget into a queue length.
 MIN_STREAM_CHUNK = 4096
 
+# How much of an unknown-length stream is buffered before the first byte
+# leaves for Telegram: one document part, so a part that fills completely
+# is a full 2 GB document and the remainder is the last one.
+STREAM_PART_SIZE = PART_SIZE_DEFAULT
+
+# How finely a document part is read off an unknown-length stream while it
+# is being handed to the uploader.
+STREAM_READ_CHUNK = 1024 * 1024
+
 
 rate = Rate(20, Duration.SECOND)
 bucket = InMemoryBucket([rate])
@@ -437,8 +446,17 @@ class TelegramStore(MessageBroker, IStore):
         more to turn a 2 GB upload into a message; reading nothing from the
         client in that time made WebDAV clients give up on an idle
         connection (FileZilla after 20 seconds).
+
+        A stream of unknown length (``size < 0`` -- an SFTP write in
+        flight, say) cannot be partitioned up front; it is read in 2 GiB
+        document parts that are each streamed straight to Telegram, the
+        last one ending wherever the source runs dry. Bots can send up to
+        2 GiB per document, so every part of such an upload goes through
+        the bot API regardless of any premium account.
         """
         size = file_msg.get_size()
+        if size < 0:
+            return await self._upload_streamed(file_msg)
         file_name = file_msg.name or "unnamed"
         part_size, premium_upload = self._part_size_for(size)
         parts = list(self._partition(size, part_size))
@@ -481,6 +499,70 @@ class TelegramStore(MessageBroker, IStore):
                     )
                 )
                 file_msg.next_part(part)
+            return list(await asyncio.gather(*sends))
+        except BaseException:
+            for task in sends:
+                task.cancel()
+            await asyncio.gather(*sends, return_exceptions=True)
+            raise
+
+    def _stream_part_message(
+        self, file_msg: UploadableFileMessage, limit: int, first: bytes, name: str
+    ) -> FileMessageFromStream:
+        """Wrap the next ``limit`` bytes of ``file_msg`` as its own stream.
+
+        ``first`` is a byte already taken off the message that opens this
+        part (the peek that decides whether the previous part was the last
+        one). The part ends when ``limit`` bytes have been produced or the
+        message runs dry -- whichever comes first, so the uploader learns
+        the size of the final part only at its end.
+        """
+
+        async def part_stream() -> AsyncIterator[bytes]:
+            if first:
+                yield first
+            remaining = limit - len(first)
+            while remaining > 0:
+                data = await file_msg.read(min(STREAM_READ_CHUNK, remaining))
+                if not data:
+                    return
+                remaining -= len(data)
+                yield data
+
+        return FileMessageFromStream.new(stream=part_stream(), size=-1, name=name)
+
+    async def _upload_streamed(
+        self, file_msg: UploadableFileMessage
+    ) -> List[SentFileMessage]:
+        file_name = file_msg.name or "unnamed"
+        sends: List[asyncio.Task[SentFileMessage]] = []
+        try:
+            await file_msg.open()
+            index = 0
+            first = await file_msg.read(1)
+            while first:
+                part_msg = self._stream_part_message(
+                    file_msg,
+                    STREAM_PART_SIZE,
+                    first,
+                    f"[part{index + 1}]{file_name}",
+                )
+                uploader, uploaded = await self._upload_part(
+                    part_msg, use_account_api=False
+                )
+                sends.append(
+                    asyncio.create_task(
+                        self._send_uploaded(uploader, uploaded, part_msg.name)
+                    )
+                )
+                if uploaded < STREAM_PART_SIZE:
+                    # The source ran dry inside this part: it was the last.
+                    break
+                index += 1
+                # Peek one byte to see whether anything follows the full
+                # part; it opens the next part, so a file of exactly one
+                # part does not grow an empty second one.
+                first = await file_msg.read(1)
             return list(await asyncio.gather(*sends))
         except BaseException:
             for task in sends:

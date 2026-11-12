@@ -91,15 +91,22 @@ client fail outright — which is exactly what the integration test caught.
 ### Writes: a size that is not known in advance
 
 Telegram uploads need the total size up front (it decides the part layout);
-SFTP never sends it. So `WriteHandle` spools the payload — in memory up to
-`upload_buffer_size_mb`, on disk beyond that, via `SpooledTemporaryFile` —
-and only on `close()` streams it into `Ops.upload_from_stream` with the
-size now known.
+SFTP never sends it. `WriteHandle` therefore streams sequential writes
+straight into `Ops.upload_from_stream` with size `-1`: the stores use the
+Telegram streamed-upload protocol (`upload.saveBigFilePart` with
+`file_total_parts = -1`, the real total only on the last part), so bytes
+travel while the client is still writing. The Discord store already takes
+an unknown size.
 
-Buffering is not just a workaround for the missing size: it also makes
-out-of-order and sparse writes work, since the spool is seekable, and it
-keeps a dropped connection from committing a truncated file — `exit()`
-aborts anything still open rather than closing it.
+Writes that run ahead of the streamed position are staged in memory up to
+`upload_buffer_size_mb`, on disk beyond that, and flushed in order as the
+upload consumes them. A write that goes backwards before anything has been
+streamed falls back to the old spool path (`SpooledTemporaryFile`) so
+out-of-order and sparse writes keep working; a backwards write after
+streaming has started is rejected, since those bytes are already on the
+wire. A dropped connection aborts the upload rather than committing a
+truncated file — `exit()` aborts anything still open rather than closing
+it.
 
 `Ops.touch()` is called at open time so the name shows up in a listing
 while the upload is still running, matching the WebDAV `PUT` path.

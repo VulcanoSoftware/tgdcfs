@@ -10,11 +10,13 @@ import datetime
 
 import asyncssh
 import pytest
+
+from tests.tgdcfs.app.sftp.mocked_stats import mocked_stats
 from tgdcfs.app.sftp.server import make_server_factory, make_sftp_factory
 from tgdcfs.config import SFTPConfig
 from tgdcfs.core import Client
 from tgdcfs.core.model import TGFSDirectory, TGFSFileDesc, TGFSFileVersion
-from tests.tgdcfs.app.sftp.mocked_stats import mocked_stats
+from tgdcfs.reqres import UploadableFileMessage
 
 CONTENT = bytes(range(256)) * 400  # 100 KiB
 CREATED_AT = datetime.datetime(2024, 1, 1, 12, 0, 0)
@@ -74,13 +76,17 @@ def build_client(mocker, name: str, channel: FakeChannel) -> Client:
         return stream()
 
     async def upload(directory, file_msg):
-        # `touch` sends a FileMessageEmpty, which carries no readable body.
-        size = file_msg.size or 0
-        data = await file_msg.read(size) if size > 0 else b""
+        # `touch` sends a FileMessageEmpty, which carries no readable body;
+        # a live upload (SFTP) has an unknown size and is drained to EOF.
+        data = bytearray()
+        if isinstance(file_msg, UploadableFileMessage):
+            while chunk := await file_msg.read(8192):
+                data.extend(chunk)
+        payload = bytes(data)
         if not directory.find_files([file_msg.name]):
-            channel.add_file(directory, file_msg.name, data)
+            channel.add_file(directory, file_msg.name, payload)
         else:
-            channel.contents[file_msg.name] = data
+            channel.contents[file_msg.name] = payload
         return desc(directory.find_file(file_msg.name))
 
     async def rm(fr):
