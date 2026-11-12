@@ -65,10 +65,11 @@ class FileUploader:
     ):
         self.client = client
         self._file_msg = file_msg
-        raw_size = self._file_msg.get_size()
-        # None / negative means "size unknown -- use streamed upload".
-        self._streaming = raw_size is None or raw_size < 0
-        self._file_size = 0 if self._streaming else int(raw_size)
+        # size is None means "size unknown -- use streamed upload".
+        # get_size() returns 0 in that case so the rest of the codebase
+        # (task tracker, crypto, mirrors) keeps seeing an int.
+        self._streaming = self._file_msg.size is None
+        self._file_size = 0 if self._streaming else self._file_msg.get_size()
         self._file_name = self._file_msg.file_name()
 
         # One part size for every file. The library's heuristic drops to
