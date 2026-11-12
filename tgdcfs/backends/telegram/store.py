@@ -493,6 +493,7 @@ class TelegramStore(MessageBroker, IStore):
             raise
         finally:
             await file_msg.close()
+
     async def upload(self, file_msg: UploadableFileMessage) -> List[SentFileMessage]:
         """Upload ``file_msg`` in parts of at most one Telegram document.
 
