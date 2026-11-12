@@ -54,7 +54,13 @@ def build_client(mocker, name: str) -> Client:
     )
     client.file_api.rm = mocker.AsyncMock()
     client.file_api.move = mocker.AsyncMock()
-    client.file_api.upload = mocker.AsyncMock()
+    async def upload(directory, file_msg):
+        # Keep the stream consumer alive until the producer sends EOF.
+        if hasattr(file_msg, "stream"):
+            while await file_msg.read(512 * 1024):
+                pass
+
+    client.file_api.upload = mocker.AsyncMock(side_effect=upload)
 
     client.fc_repo = mocker.Mock()
     client.fc_repo.content_length = mocker.AsyncMock(return_value=FILE_SIZE)
