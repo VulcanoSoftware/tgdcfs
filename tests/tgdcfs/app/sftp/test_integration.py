@@ -13,6 +13,7 @@ import pytest
 from tgdcfs.app.sftp.server import make_server_factory, make_sftp_factory
 from tgdcfs.config import SFTPConfig
 from tgdcfs.core import Client
+from tgdcfs.reqres import FileMessageEmpty
 from tgdcfs.core.model import TGFSDirectory, TGFSFileDesc, TGFSFileVersion
 from tests.tgdcfs.app.sftp.mocked_stats import mocked_stats
 
@@ -74,11 +75,14 @@ def build_client(mocker, name: str, channel: FakeChannel) -> Client:
         return stream()
 
     async def upload(directory, file_msg):
-        # `touch` sends a FileMessageEmpty, which carries no readable body.
-        received = bytearray()
-        while chunk := await file_msg.read(512 * 1024):
-            received.extend(chunk)
-        data = bytes(received)
+        # `touch` creates the file with an empty marker before the first write.
+        if isinstance(file_msg, FileMessageEmpty):
+            data = b""
+        else:
+            received = bytearray()
+            while chunk := await file_msg.read(512 * 1024):
+                received.extend(chunk)
+            data = bytes(received)
         if not directory.find_files([file_msg.name]):
             channel.add_file(directory, file_msg.name, data)
         else:
