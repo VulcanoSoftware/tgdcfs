@@ -437,9 +437,25 @@ class TelegramStore(MessageBroker, IStore):
         more to turn a 2 GB upload into a message; reading nothing from the
         client in that time made WebDAV clients give up on an idle
         connection (FileZilla after 20 seconds).
+
+        A size of -1 -- an upload whose length is not known up front, an
+        SFTP transfer -- is one streamed document: Telegram's
+        streamed-upload rules need no total, and the document's message
+        reports the length the stream turned out to have.
         """
         size = file_msg.get_size()
         file_name = file_msg.name or "unnamed"
+
+        if size < 0:
+            # Unknown length: one document, streamed. Prefer the premium
+            # account when the deployment allows one -- without a size
+            # there is no telling how big the file is, and the account's
+            # documents are the larger ones.
+            uploader, uploaded = await self._upload_part(
+                file_msg, use_account_api=self._premium_upload
+            )
+            return [await self._send_uploaded(uploader, uploaded, file_msg.name)]
+
         part_size, premium_upload = self._part_size_for(size)
         parts = list(self._partition(size, part_size))
 

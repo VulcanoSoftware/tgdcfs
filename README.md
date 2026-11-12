@@ -79,7 +79,6 @@ tgdcfs:
     host_key_file: sftp_host_key
     # authorized_keys_dir: sftp_authorized_keys
     # upload_buffer_size_mb: 64
-    # upload_buffer_dir: ''
 ```
 
 Both interfaces run in the same process and go through the same core, so
@@ -113,13 +112,13 @@ holding one file per user — named after the username, in the usual
 still have to be listed under `tgdcfs.users` so the readonly flag keeps
 applying; everyone else falls back to password authentication.
 
-**Uploads are buffered.** Telegram needs a file's total size before the
-first byte goes out and SFTP never announces it, so an incoming upload is
-held in memory up to `upload_buffer_size_mb` (default 64) and spills to
-`upload_buffer_dir` (the system temp directory when unset) beyond that.
-Plan for that much scratch space when pushing large files. A transfer that
-is cut off mid-flight is discarded rather than committed, so an interrupted
-upload never truncates an existing file.
+**Uploads stream.** The file size is not known up front and the stores
+take the stream as it comes -- Telegram through its streamed-upload
+rules, Discord as a plain stream of parts -- so an upload goes straight
+through to the stores while it arrives, in bounded memory
+(`upload_buffer_size_mb`, default 64; `0` disables the limit). A transfer
+that is cut off mid-flight is discarded rather than committed, so an
+interrupted upload never truncates an existing file.
 
 **Known limits**, all of them shared with the WebDAV interface: files
 cannot be appended to or partially updated (every write stores a new

@@ -247,11 +247,11 @@ class SFTPConfig:
     the usual ``authorized_keys`` format. The user must still exist in
     ``tgdcfs.users`` so the readonly flag keeps applying.
 
-    ``upload_buffer_size_mb`` is how much of an incoming upload is kept in
-    memory before it spills over to ``upload_buffer_dir`` (the system temp
-    directory when empty). SFTP never announces the file size up front
-    while Telegram uploads need it, so a whole file has to be buffered
-    before it can be sent.
+    ``upload_buffer_size_mb`` is how much of an in-flight upload may sit in
+    memory while it streams to the stores: a write waits for room once the
+    buffer is full, which is what holds back a client that writes faster
+    than the stores take. ``0`` disables the limit. ``upload_buffer_dir`` is
+    accepted but ignored -- uploads are streamed, not spooled to disk.
     """
 
     enabled: bool

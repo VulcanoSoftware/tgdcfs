@@ -113,10 +113,11 @@ tgdcfs:
   # one file <dir>/<username> per user, in the usual authorized_keys format.
   # The user must still be listed under `users` so the readonly flag applies.
   #
-  # `upload_buffer_size_mb` (default 64) is how much of an incoming upload is
-  # held in memory before it spills to `upload_buffer_dir` (system temp when
-  # empty). SFTP does not announce the file size up front while Telegram
-  # uploads need it, so a whole file has to be buffered before it is sent.
+  # `upload_buffer_size_mb` (default 64) is how much of an in-flight upload
+  # may sit in memory while it streams to the stores: a write waits for room
+  # once the buffer is full, which holds back a client that writes faster
+  # than the stores take. `0` disables the limit. `upload_buffer_dir` is
+  # accepted but ignored -- uploads are streamed, not spooled to disk.
   # ---------------------------------------------------------------------------
   sftp:
     enabled: false
@@ -125,7 +126,6 @@ tgdcfs:
     host_key_file: sftp_host_key
     # authorized_keys_dir: sftp_authorized_keys
     # upload_buffer_size_mb: 64
-    # upload_buffer_dir: ''
   # ---------------------------------------------------------------------------
   # Optional transfer tuning.
   #

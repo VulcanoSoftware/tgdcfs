@@ -407,3 +407,40 @@ class TestReplaceDocument:
         await store.replace_document(12345, b"test data", "test.bin")
 
         mock_from_buffer.assert_called_once_with(buffer=b"test data", name="test.bin")
+
+
+class TestStreamedUpload:
+    """A size of -1 -- an SFTP transfer -- is one streamed document."""
+
+    @pytest.mark.asyncio
+    async def test_one_document_of_unknown_length(self, store, mock_uploader):
+        result = await store.upload(MockFileMessage("stream.bin", -1))
+
+        assert len(result) == 1
+        assert result[0].message_id == 12345
+        assert result[0].size == 1000
+        mock_uploader.upload.assert_awaited_once()
+        mock_uploader.send.assert_awaited_once_with(123456789)
+
+    @pytest.mark.asyncio
+    async def test_the_name_is_not_suffixed(self, store, mock_uploader, mocker):
+        seen = []
+
+        def build_uploader(api, msg):
+            seen.append(msg.name)
+            return mock_uploader
+
+        mocker.patch(
+            "tgdcfs.backends.telegram.store.FileUploader", side_effect=build_uploader
+        )
+
+        await store.upload(MockFileMessage("stream.bin", -1))
+
+        assert seen == ["stream.bin"]
+
+    @pytest.mark.asyncio
+    async def test_a_streamed_part_failure_propagates(self, store, mock_uploader):
+        mock_uploader.upload.side_effect = Exception("Upload failed")
+
+        with pytest.raises(Exception, match="Upload failed"):
+            await store.upload(MockFileMessage("stream.bin", -1))

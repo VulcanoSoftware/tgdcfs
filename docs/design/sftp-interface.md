@@ -90,16 +90,25 @@ client fail outright — which is exactly what the integration test caught.
 
 ### Writes: a size that is not known in advance
 
-Telegram uploads need the total size up front (it decides the part layout);
-SFTP never sends it. So `WriteHandle` spools the payload — in memory up to
-`upload_buffer_size_mb`, on disk beyond that, via `SpooledTemporaryFile` —
-and only on `close()` streams it into `Ops.upload_from_stream` with the
-size now known.
+Telegram used to need the total size up front, which is why `WriteHandle`
+spooled the whole payload first. It no longer does: the Telegram API's
+streamed-upload rules (core.telegram.org/api/files#streamed-uploads) take
+a stream of unknown length — every part through `upload.saveBigFilePart`
+with `file_total_parts` -1, and the part the stream ends on carrying the
+true count — and Discord takes a plain stream of parts. So `WriteHandle`
+pipes the bytes straight into `Ops.upload_from_stream` as they arrive,
+with the size passed as -1.
 
-Buffering is not just a workaround for the missing size: it also makes
-out-of-order and sparse writes work, since the spool is seekable, and it
-keeps a dropped connection from committing a truncated file — `exit()`
-aborts anything still open rather than closing it.
+The upload starts with the first write that reaches offset 0 and ends on
+`close()`. Writes land in a bounded buffer that the upload drains; a
+write only returns once there is room for it, which is the backpressure
+holding back a client that writes faster than the stores take
+(`upload_buffer_size_mb`, `0` disables the limit). Writes are expected
+front to back: a chunk arriving ahead of the stream is kept until the gap
+before it fills, while a write behind what the upload already consumed
+fails the transfer — a stream cannot be rewound. A dropped connection
+still commits nothing: `exit()` aborts anything still open rather than
+closing it.
 
 `Ops.touch()` is called at open time so the name shows up in a listing
 while the upload is still running, matching the WebDAV `PUT` path.

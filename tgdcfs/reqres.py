@@ -305,6 +305,7 @@ class FileMessageFromBuffer(UploadableFileMessage):
 class FileMessageFromStream(UploadableFileMessage):
     stream: FileContent
     buffer: bytearray = field(default_factory=bytearray)
+    _eof: bool = field(default=False, init=False)
 
     @classmethod
     def new(
@@ -330,15 +331,37 @@ class FileMessageFromStream(UploadableFileMessage):
         Kept in one buffer rather than a list of chunks: rejoining the list
         on every read copies everything still pending, which for a stream
         arriving in small chunks is quadratic in the size of the part.
+
+        A ``size`` of -1 means the length is not known: the stream is then
+        drained until ``length`` bytes are buffered or it ends, and a
+        short answer -- empty included -- means the stream is over.
         """
-        size_to_return = min(length, self.get_size() - self._read_size)
-        while len(self.buffer) < size_to_return:
-            self.buffer.extend(await anext(self.stream))
+        size_to_return = self.get_size() - self._read_size
+        if size_to_return >= 0:
+            # Known length: satisfy the request exactly.
+            size_to_return = min(length, size_to_return)
+            while len(self.buffer) < size_to_return and not self._eof:
+                await self._take()
+        else:
+            # Unknown length: take up to ``length`` or the end.
+            while len(self.buffer) < length and not self._eof:
+                await self._take()
+            size_to_return = min(length, len(self.buffer))
 
         res = bytes(self.buffer[:size_to_return])
         del self.buffer[:size_to_return]
         self._read_size += size_to_return
         return res
+
+    async def _take(self) -> None:
+        """Buffer the stream's next chunk, remembering when it ends."""
+        try:
+            chunk = await anext(self.stream)
+        except StopAsyncIteration:
+            self._eof = True
+            return
+        if chunk:
+            self.buffer.extend(chunk)
 
 
 @dataclass

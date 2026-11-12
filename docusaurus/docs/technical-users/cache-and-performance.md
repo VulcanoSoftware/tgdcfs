@@ -34,7 +34,7 @@ tgdcfs:
 - **Upload Staging (`stage_uploads: true`)**: Incoming client uploads write to disk simultaneously. Mirror workers upload to secondary channels from local disk instead of downloading from primary channel first!
 - **Read Caching (`keep_for_reads: true`)**: Serves video seeking, media playback, and SFTP directory walks from local disk. Missing blocks are fetched on demand from cloud channels.
 - **Sparse File Storage**: Read cache entries use sparse files. Only touched blocks consume disk space (`du`).
-- **Disk Headroom Protection (`min_free_mb: 1024`)**: Ensures cache never exhausts disk space needed for metadata, session databases, or SFTP spools.
+- **Disk Headroom Protection (`min_free_mb: 1024`)**: Ensures cache never exhausts disk space needed for metadata and session databases.
 
 ---
 
