@@ -189,7 +189,7 @@ class FileTags:
 @dataclass
 class FileMessage:
     name: str
-    size: int
+    size: Optional[int]  # None means "size unknown" (streamed upload)
 
 
 @dataclass
@@ -206,11 +206,13 @@ class UploadableFileMessage(FileMessage):
     # the local cache under the same id the metadata will carry.
     version_id: Optional[str] = field(default=None, kw_only=True)
 
-    def _get_size(self) -> int:
+    def _get_size(self) -> Optional[int]:
         return 0
 
-    def get_size(self) -> int:
-        return self.size or self._get_size()
+    def get_size(self) -> Optional[int]:
+        if self.size is not None:
+            return self.size
+        return self._get_size()
 
     async def open(self) -> None:
         pass
@@ -310,7 +312,7 @@ class FileMessageFromStream(UploadableFileMessage):
     def new(
         cls,
         stream: FileContent,
-        size: int,
+        size: Optional[int] = None,
         name: str = "unnamed",
     ) -> "FileMessageFromStream":
         return cls(
@@ -325,28 +327,29 @@ class FileMessageFromStream(UploadableFileMessage):
         )
 
     async def read(self, length: int) -> bytes:
-        """Take ``length`` bytes off the front of the stream.
+        """Take up to ``length`` bytes off the front of the stream.
 
-        Kept in one buffer rather than a list of chunks: rejoining the list
-        on every read copies everything still pending, which for a stream
-        arriving in small chunks is quadratic in the size of the part.
+        When size is known we never return more than the remaining bytes.
+        When size is unknown (streamed upload) we read until the stream
+        ends or the requested length is satisfied.
         """
-        size_to_return = min(length, self.get_size() - self._read_size)
+        if self.size is not None:
+            size_to_return = min(length, self.size - self._read_size)
+            if size_to_return <= 0:
+                return b""
+        else:
+            size_to_return = length
+
         while len(self.buffer) < size_to_return:
-            self.buffer.extend(await anext(self.stream))
+            try:
+                chunk = await anext(self.stream)
+            except StopAsyncIteration:
+                break
+            if not chunk:
+                break
+            self.buffer.extend(chunk)
 
         res = bytes(self.buffer[:size_to_return])
-        del self.buffer[:size_to_return]
-        self._read_size += size_to_return
+        del self.buffer[: len(res)]
+        self._read_size += len(res)
         return res
-
-
-@dataclass
-class FileMessageImported(FileMessage):
-    message_id: int
-
-    @classmethod
-    def new(
-        cls, message_id: int, size: int, name: str = "unnamed"
-    ) -> "FileMessageImported":
-        return cls(name=name, size=size, message_id=message_id)
