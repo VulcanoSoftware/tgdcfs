@@ -162,8 +162,8 @@ class WriteHandle(Handle):
         self._spool_dir = spool_dir
 
         # Streaming path (sequential writes).
-        self._queue: Optional[asyncio.Queue] = None
-        self._upload_task: Optional[asyncio.Task] = None
+        self._queue: Optional[asyncio.Queue[object]] = None
+        self._upload_task: Optional[asyncio.Task[None]] = None
         self._next_offset = 0
         self._stream_failed = False
 
@@ -316,7 +316,8 @@ class WriteHandle(Handle):
                 item = await self._queue.get()
                 if item is _STREAM_EOF:
                     return
-                yield item
+                assert isinstance(item, (bytes, bytearray))
+                yield bytes(item)
 
         try:
             await self._ops.upload_from_stream(stream(), None, self._path)
