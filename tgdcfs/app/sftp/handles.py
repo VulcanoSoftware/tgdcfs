@@ -3,6 +3,7 @@ import errno
 import logging
 import os
 import tempfile
+import threading
 from typing import AsyncIterator, Optional
 
 from tgdcfs.core import Ops
@@ -166,18 +167,27 @@ class SpoolReadHandle(Handle):
 
 
 class WriteHandle(Handle):
-    """Buffers an SFTP upload until its total size is known.
+    """Receives an SFTP upload and gets it into the stores.
 
-    Telegram uploads need the size up front and SFTP never announces it, so
-    the payload is spooled -- in memory up to ``spool_max_bytes``, on disk
-    beyond that -- and only committed once the client closes the handle.
-    Buffering also makes out-of-order and sparse writes work, since the
-    spool can simply be seeked.
+    Telegram needs the size of a file before its first byte and SFTP never
+    announces it, so the payload is spooled -- in memory up to
+    ``spool_max_bytes``, on disk beyond that. Buffering also makes
+    out-of-order and sparse writes work, since the spool can be seeked.
 
-    Committing means uploading to the stores, which takes as long again as
-    the client needed to send the data, and the client waits for the answer
-    to its CLOSE meanwhile. With a ``pending`` registry the finished spool
-    is handed over to it instead and the CLOSE is answered right away.
+    What happens to the spool depends on the settings:
+
+    * By default it is uploaded when the client closes the handle, and the
+      client waits for the answer to its CLOSE, which takes as long again
+      as the transfer itself.
+    * With a ``pending`` registry (``sftp.write_behind``) the finished spool
+      is handed over to it and the CLOSE is answered right away.
+    * With ``stream_segment_bytes`` (``sftp.stream_segment_mb``) the upload
+      to the stores starts as soon as the first segment of that size has
+      arrived and keeps pace with the client, so at CLOSE only the last,
+      partial segment is left. The file is stored as one part per segment.
+      The price is that data already sent on can no longer be rewritten:
+      a write into it fails. Files smaller than one segment are not
+      affected and go the default way.
     """
 
     def __init__(
@@ -188,11 +198,13 @@ class WriteHandle(Handle):
         spool_dir: Optional[str] = None,
         pending: Optional[PendingUploads] = None,
         client_name: str = "",
+        stream_segment_bytes: int = 0,
     ):
         self._ops = ops
         self._path = path
         self._pending = pending
         self._client_name = client_name
+        self._spool_dir = spool_dir
         self._spool = tempfile.SpooledTemporaryFile(
             max_size=spool_max_bytes, dir=spool_dir
         )
@@ -200,6 +212,21 @@ class WriteHandle(Handle):
         self._dirty = False
         self._closed = False
         self._lock = asyncio.Lock()
+
+        # Streaming state. ``_hwm`` is the length of the prefix that has
+        # been written without holes, ``_islands`` the ranges written
+        # beyond it, ``_yielded`` how much of the prefix went to the stores
+        # (and so must not change any more).
+        self._segment_bytes = stream_segment_bytes
+        self._io = threading.Lock()
+        self._claim = asyncio.Lock()
+        self._cond = asyncio.Condition()
+        self._hwm = 0
+        self._islands: list[tuple[int, int]] = []
+        self._yielded = 0
+        self._finished = False
+        self._aborted = False
+        self._stream: Optional["asyncio.Task[object]"] = None
 
     @property
     def path(self) -> str:
@@ -213,17 +240,29 @@ class WriteHandle(Handle):
         async with self._lock:
             if self._closed:
                 raise ValueError("write on a closed handle")
-            await asyncio.to_thread(self._write_sync, offset, data)
+            self._raise_if_stream_failed()
+            async with self._claim:
+                if self._stream is not None and offset < self._yielded:
+                    raise ValueError(
+                        f"cannot rewrite the first {self._yielded} bytes of "
+                        f"{self._path}: they are already on their way to the "
+                        "stores (sftp.stream_segment_mb)"
+                    )
+                await asyncio.to_thread(self._write_sync, offset, data)
+            if self._segment_bytes:
+                await self._note_written(offset, offset + len(data))
 
     async def close(self) -> None:
-        """Commit the buffered payload as a new version of the file."""
+        """Commit the received payload as a new version of the file."""
         async with self._lock:
             if self._closed:
                 return
             self._closed = True
             handed_over = False
             try:
-                if self._dirty and self._pending is not None:
+                if self._stream is not None:
+                    await self._finish_stream()
+                elif self._dirty and self._pending is not None:
                     await self._pending.submit(
                         self._ops,
                         self._client_name,
@@ -241,18 +280,92 @@ class WriteHandle(Handle):
                     await asyncio.to_thread(self._spool.close)
 
     async def abort(self) -> None:
-        """Drop the buffered payload without touching the stored file."""
+        """Drop the received payload without touching the stored file."""
         async with self._lock:
             if self._closed:
                 return
             self._closed = True
+            if self._stream is not None:
+                async with self._cond:
+                    self._aborted = True
+                    self._cond.notify_all()
+                # The segments already sent are deleted again on the way out.
+                await asyncio.gather(self._stream, return_exceptions=True)
             await asyncio.to_thread(self._spool.close)
 
     def _write_sync(self, offset: int, data: bytes) -> None:
-        self._spool.seek(offset)
-        self._spool.write(data)
+        with self._io:
+            self._spool.seek(offset)
+            self._spool.write(data)
         self._size = max(self._size, offset + len(data))
         self._dirty = True
+
+    def _read_sync(self, offset: int, size: int) -> bytes:
+        with self._io:
+            self._spool.seek(offset)
+            return self._spool.read(size)
+
+    # -- streaming ----------------------------------------------------------
+
+    async def _note_written(self, start: int, end: int) -> None:
+        async with self._cond:
+            if end > self._hwm:
+                if start <= self._hwm:
+                    self._hwm = end
+                else:
+                    self._islands.append((start, end))
+                    self._islands.sort()
+                while self._islands and self._islands[0][0] <= self._hwm:
+                    self._hwm = max(self._hwm, self._islands.pop(0)[1])
+            if self._stream is None and self._hwm >= self._segment_bytes:
+                self._stream = asyncio.create_task(
+                    self._ops.upload_from_unsized_stream(
+                        self._growing(),
+                        self._path,
+                        self._segment_bytes,
+                        self._spool_dir,
+                    )
+                )
+            self._cond.notify_all()
+
+    def _raise_if_stream_failed(self) -> None:
+        stream = self._stream
+        if stream is not None and stream.done() and not stream.cancelled():
+            if (error := stream.exception()) is not None:
+                raise error
+
+    async def _finish_stream(self) -> None:
+        assert self._stream is not None  # noqa: S101
+        async with self._cond:
+            # Whatever was never written is a hole, and a hole reads as zeros.
+            self._hwm = self._size
+            self._finished = True
+            self._cond.notify_all()
+        await self._stream
+
+    async def _growing(self) -> AsyncIterator[bytes]:
+        """The spool as a stream that grows while the client keeps writing."""
+        offset = 0
+        while True:
+            async with self._cond:
+                await self._cond.wait_for(
+                    lambda: self._hwm > offset or self._finished or self._aborted
+                )
+                if self._aborted:
+                    raise RuntimeError(f"upload of {self._path} was aborted")
+                limit = self._hwm
+            if limit <= offset:
+                return
+            while offset < limit:
+                size = min(SPOOL_READ_CHUNK, limit - offset)
+                async with self._claim:
+                    # From here on the bytes are spoken for.
+                    self._yielded = offset + size
+                chunk = await asyncio.to_thread(self._read_sync, offset, size)
+                if not chunk:
+                    raise RuntimeError(f"spool of {self._path} ended early")
+                offset += len(chunk)
+                yield chunk
 
     async def _iter_spool(self) -> AsyncIterator[bytes]:
         await asyncio.to_thread(self._spool.seek, 0)

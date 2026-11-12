@@ -139,7 +139,44 @@ first:
   is pending, so the cap cannot deadlock;
 * `main()` drains the registry after the listener is closed.
 
-The cost is the point where the client is told "done": the data is only in a
+#### Streaming without a known size: segments
+
+`write_behind` only moves the wait. Whether the size is really needed first
+depends on what a part is: Telegram's `saveBigFilePart` carries
+`file_total_parts`, so every *document* needs its size before its first
+byte -- but the unit is ours to choose. A version is already stored as a
+list of parts with their sizes, and every read maps a byte range onto that
+list, so the parts need not be 2 GB each. `sftp.stream_segment_mb` makes an
+unsized upload a sequence of segments:
+
+* `WriteHandle` tracks the prefix written without holes (`_hwm`). When it
+  reaches one segment it starts `Ops.upload_from_unsized_stream` over a
+  stream that grows with the spool (`_growing`), and keeps feeding it as the
+  client writes. Bytes handed to the stream are spoken for: a later write
+  below `_yielded` is refused, anything beyond may still be rewritten, and a
+  hole at the end reads as zeros.
+* `FileMessageFromStream(size=None)` is an *unsized* message: `get_size`
+  raises, `read` is short only at the end of the stream, and the task shows
+  no total.
+* `StoreFileContentRepository._upload_segments` fills a spool of
+  `segment_size` bytes, hands it to the store as an ordinary upload of known
+  size (`FileMessageFromSpool`, numbered from `part_offset` so the parts
+  keep counting), and fills the next one while that is on its way. A
+  segment smaller than the size ends the stream. On any failure the parts
+  already sent are deleted again, forced, because they never belonged to a
+  file.
+* Encryption wraps the unsized message and encrypts until the plaintext
+  ends; the repository cuts the *ciphertext* into segments, which is what
+  it already does at the 2 GB part boundary. Staging in the cache and
+  tee-ing to mirrors need the size and are skipped; the mirrors copy the
+  finished parts afterwards.
+
+Trade-offs: more messages per large file, no rewriting of sent bytes, and
+the wait at the end is the last segment rather than nothing. Files below one
+segment keep the old path. The part count is bounded by what a version can
+hold, not by Telegram.
+
+The cost of `write_behind` is the point where the client is told "done": the data is only in a
 spool, in memory or a temp file, not in a store. A crash loses it; a failure
 is logged and marked failed in the task list, not returned to the client. It
 is therefore opt-in, and `write_ack: cache`, which keeps the bytes on the

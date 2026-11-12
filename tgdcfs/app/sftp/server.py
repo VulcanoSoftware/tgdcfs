@@ -493,6 +493,7 @@ class TGFSSFTPServer(asyncssh.SFTPServer):
             spool_dir=sftp_cfg.upload_buffer_dir,
             pending=self._pending,
             client_name=resolved.client_name,
+            stream_segment_bytes=sftp_cfg.stream_segment_bytes,
         )
         self._handles.append(handle)
         return handle

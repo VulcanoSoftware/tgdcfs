@@ -135,7 +135,8 @@ class FakeStore(IStore):
                 data.extend(chunk)
             part += 1
             mid = self._add(
-                document=bytes(data), name=f"[part{part}]{file_msg.file_name()}"
+                document=bytes(data),
+                name=f"[part{file_msg.part_offset + part}]{file_msg.file_name()}",
             )
             res.append(SentFileMessage(message_id=mid, size=len(data)))
             remaining -= len(data)

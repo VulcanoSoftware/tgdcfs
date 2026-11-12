@@ -378,7 +378,9 @@ class DiscordStore(IStore):
                 tasks.append(
                     asyncio.create_task(
                         self._send_part_with_slot(
-                            data, f"[part{index}]{file_name}", unstarted
+                            data,
+                            f"[part{file_msg.part_offset + index}]{file_name}",
+                            unstarted,
                         )
                     )
                 )

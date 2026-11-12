@@ -82,6 +82,7 @@ tgdcfs:
     # upload_buffer_dir: ''
     # write_behind: false         # answer an upload once it is buffered
     # write_behind_max_mb: 2048   # most data held back this way, 0 = no cap
+    # stream_segment_mb: 0        # upload to Telegram while the client sends, 0 = off
 ```
 
 Both interfaces run in the same process and go through the same core, so
@@ -150,6 +151,35 @@ upload is logged (and shown in the task list) instead of being reported to
 the client. WebDAV does not see a file until it is in the stores. For
 durability across restarts use `write_ack: cache` on the file system, which
 does the same for WebDAV and SFTP with the data on disk. Off by default.
+
+**Uploading while the client is still sending (`stream_segment_mb`).**
+Telegram needs a part's size before its first byte, so an upload of unknown
+length cannot be streamed as one piece. What can be done is to cut it into
+segments: with `stream_segment_mb: 256` the file is uploaded to Telegram in
+parts of 256 MB, each as soon as it is full, while the client keeps sending
+the next. When the client is done only the last, partial segment is left, so
+the second wait shrinks from the length of the transfer to at most one
+segment, and nothing is held back that the stores have not confirmed.
+
+* The file is stored as one Telegram message per segment (a 10 GB file with
+  256 MB segments is 40 messages). A larger segment means fewer messages but
+  a longer wait at the end; the largest allowed is 1900.
+* Files smaller than one segment are unaffected and keep the default path
+  (spool, upload on close, or `write_behind` when that is on).
+* Data that has already been sent on cannot be rewritten: a client that goes
+  back to change earlier bytes of such a large file gets an error. Ordinary
+  uploads (`put`, FileZilla, WinSCP, rclone) write front to back.
+* Parts that were already uploaded when a transfer fails or is cut off are
+  deleted again.
+* Encryption works as usual; the ciphertext is what is cut into segments.
+* The mirrors copy the finished parts from the primary store afterwards
+  (instead of in parallel); the local cache does not stage these uploads.
+* On disk the server holds the file being received, as before, plus up to two
+  segments in flight.
+
+It combines with `write_behind`: that one only applies to the (short) tail
+of a streamed file when it is off, so with streaming on the close still
+waits for the last segment. Off by default (`0`).
 
 **Known limits**, all of them shared with the WebDAV interface: files
 cannot be appended to or partially updated (every write stores a new

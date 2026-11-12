@@ -306,3 +306,26 @@ class TestConfig:
     def test_a_negative_cap_is_rejected(self):
         with pytest.raises(ValueError, match="write_behind_max_mb"):
             SFTPConfig.from_dict({"write_behind_max_mb": -1})
+
+
+class TestStreamSegmentConfig:
+    def test_streaming_is_off_by_default(self):
+        cfg = SFTPConfig.from_dict({})
+
+        assert cfg.stream_segment_mb == 0
+        assert cfg.stream_segment_bytes == 0
+
+    def test_reads_the_segment_size(self):
+        cfg = SFTPConfig.from_dict({"stream_segment_mb": 256})
+
+        assert cfg.stream_segment_bytes == 256 * 1024 * 1024
+
+    @pytest.mark.parametrize("value", [-1, 1901, 4096])
+    def test_a_segment_must_fit_one_telegram_document(self, value):
+        with pytest.raises(ValueError, match="stream_segment_mb"):
+            SFTPConfig.from_dict({"stream_segment_mb": value})
+
+    def test_the_largest_segment_is_accepted(self):
+        assert (
+            SFTPConfig.from_dict({"stream_segment_mb": 1900}).stream_segment_mb == 1900
+        )

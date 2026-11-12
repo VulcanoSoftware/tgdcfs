@@ -265,6 +265,18 @@ class SFTPConfig:
     default. ``write_behind_max_mb`` caps the data held back this way
     (``0`` means no cap); a close that would exceed it is answered only
     once earlier uploads have finished.
+
+    ``stream_segment_mb`` goes further and makes the upload to Telegram
+    run *while* the client is still sending. A part must have a known size
+    before it is uploaded, so the file is cut into segments of this size:
+    a segment is uploaded as soon as it is full, and only the last,
+    partial one waits for the end of the file. A file is therefore stored
+    as one Telegram message per segment (a 10 GB file with 256 MB segments
+    is 40 parts) and a larger segment means fewer parts but a longer wait
+    at the end. Files smaller than one segment are unaffected. Data that
+    has already been sent on cannot be rewritten, so a client that goes
+    back to change earlier bytes (some ``sshfs`` workloads) gets an error
+    on such a large file. ``0`` (the default) turns it off.
     """
 
     enabled: bool
@@ -276,7 +288,10 @@ class SFTPConfig:
     upload_buffer_dir: Optional[str]
     write_behind: bool = False
     write_behind_max_mb: int = 2048
+    stream_segment_mb: int = 0
 
+    # Telegram takes a document of up to just under 2 GB.
+    MAX_STREAM_SEGMENT_MB = 1900
     DEFAULT_PORT = 2222
     DEFAULT_WRITE_BEHIND_MAX_MB = 2048
     DEFAULT_HOST_KEY_FILE = "sftp_host_key"
@@ -289,6 +304,10 @@ class SFTPConfig:
     @property
     def write_behind_max_bytes(self) -> int:
         return self.write_behind_max_mb * 1024 * 1024
+
+    @property
+    def stream_segment_bytes(self) -> int:
+        return self.stream_segment_mb * 1024 * 1024
 
     @classmethod
     def from_dict(cls, data: Optional[dict]) -> "SFTPConfig":
@@ -315,6 +334,13 @@ class SFTPConfig:
                 f"got {write_behind_max_mb}"
             )
 
+        stream_segment_mb = int(data.get("stream_segment_mb", 0))
+        if not 0 <= stream_segment_mb <= cls.MAX_STREAM_SEGMENT_MB:
+            raise ValueError(
+                f"sftp.stream_segment_mb must be between 0 and "
+                f"{cls.MAX_STREAM_SEGMENT_MB}, got {stream_segment_mb}"
+            )
+
         return cls(
             enabled=bool(data.get("enabled", False)),
             host=str(data.get("host", "0.0.0.0")),  # noqa: S104
@@ -335,6 +361,7 @@ class SFTPConfig:
             ),
             write_behind=bool(data.get("write_behind", False)),
             write_behind_max_mb=write_behind_max_mb,
+            stream_segment_mb=stream_segment_mb,
         )
 
 

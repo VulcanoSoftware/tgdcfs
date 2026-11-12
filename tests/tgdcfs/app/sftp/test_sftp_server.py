@@ -72,6 +72,7 @@ def build_server(mocker, user=None, clients=None) -> TGFSSFTPServer:
     config = mocker.Mock()
     config.tgdcfs.sftp.upload_buffer_size_bytes = 1024
     config.tgdcfs.sftp.upload_buffer_dir = None
+    config.tgdcfs.sftp.stream_segment_bytes = 0
 
     if clients is None:
         clients = {"notes": build_client(mocker, "notes")}

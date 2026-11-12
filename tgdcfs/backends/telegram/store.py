@@ -452,7 +452,9 @@ class TelegramStore(MessageBroker, IStore):
             async def send(index: int) -> SentFileMessage:
                 async with slots:
                     part_msg = part_of(offsets[index], parts[index])
-                    part_msg.name = f"[part{index + 1}]{file_name}"
+                    part_msg.name = (
+                        f"[part{file_msg.part_offset + index + 1}]{file_name}"
+                    )
                     part_msg.size = parts[index]
                     return await self._send_file(
                         part_msg, use_account_api=premium_upload
@@ -470,7 +472,7 @@ class TelegramStore(MessageBroker, IStore):
         sends: List[asyncio.Task[SentFileMessage]] = []
         try:
             for i, part in enumerate(parts):
-                file_msg.name = f"[part{i + 1}]{file_name}"
+                file_msg.name = f"[part{file_msg.part_offset + i + 1}]{file_name}"
                 file_msg.size = part
                 uploader, uploaded = await self._upload_part(
                     file_msg, use_account_api=premium_upload
