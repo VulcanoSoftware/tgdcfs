@@ -313,7 +313,7 @@ class FileMessageFromStream(UploadableFileMessage):
         stream: FileContent,
         size: int,
         name: str = "unnamed",
-    ) -> FileMessageFromStream:
+    ) -> "FileMessageFromStream":
         return cls(
             name=name,
             caption="",
