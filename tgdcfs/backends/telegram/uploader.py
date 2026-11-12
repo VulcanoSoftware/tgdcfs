@@ -215,6 +215,7 @@ class FileUploader:
             return total_size
         finally:
             await self._close()
+
     async def upload(self) -> int:
         await self._file_msg.open()
         if self._file_size < 0:
