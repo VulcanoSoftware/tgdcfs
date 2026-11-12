@@ -259,8 +259,8 @@ class WriteHandle(Handle):
                     self._upload_task.cancel()
                     try:
                         await self._upload_task
-                    except (asyncio.CancelledError, Exception):
-                        pass
+                    except (asyncio.CancelledError, Exception) as ex:
+                        logger.debug("upload task cleanup after abort: %s", ex)
             if self._spool is not None:
                 await asyncio.to_thread(self._spool.close)
 
@@ -282,20 +282,22 @@ class WriteHandle(Handle):
                 self._upload_task.cancel()
                 try:
                     await self._upload_task
-                except (asyncio.CancelledError, Exception):
-                    pass
+                except (asyncio.CancelledError, Exception) as ex:
+                    logger.debug("upload task cleanup after switch to spool: %s", ex)
             self._queue = None
             self._upload_task = None
 
     def _spool_write(self, offset: int, data: bytes) -> None:
-        assert self._spool is not None
+        if self._spool is None:
+            raise RuntimeError("spool not initialized")
         self._spool.seek(offset)
         self._spool.write(data)
         self._size = max(self._size, offset + len(data))
         self._dirty = True
 
     async def _iter_spool(self) -> AsyncIterator[bytes]:
-        assert self._spool is not None
+        if self._spool is None:
+            raise RuntimeError("spool not initialized")
         await asyncio.to_thread(self._spool.seek, 0)
         remaining = self._size
         while remaining > 0:
@@ -311,12 +313,14 @@ class WriteHandle(Handle):
         """Consume the queue and feed Ops.upload_from_stream (size unknown)."""
 
         async def stream() -> AsyncIterator[bytes]:
-            assert self._queue is not None
+            if self._queue is None:
+                raise RuntimeError("stream queue not initialized")
             while True:
                 item = await self._queue.get()
                 if item is _STREAM_EOF:
                     return
-                assert isinstance(item, (bytes, bytearray))
+                if not isinstance(item, (bytes, bytearray)):
+                    raise TypeError(f"expected bytes on stream queue, got {type(item)}")
                 yield bytes(item)
 
         try:
