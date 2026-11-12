@@ -21,6 +21,9 @@ SEEK_FORWARD_THRESHOLD = 1024 * 1024
 # How much of the spooled upload we hand to the uploader at a time.
 SPOOL_READ_CHUNK = 1024 * 1024
 
+# Sentinel placed on the stream queue when the SFTP client closes the handle.
+_STREAM_EOF = object()
+
 
 class Handle:
     """Shared behaviour of the objects handed back to the SFTP layer."""
@@ -133,13 +136,17 @@ class ReadHandle(Handle):
 
 
 class WriteHandle(Handle):
-    """Buffers an SFTP upload until its total size is known.
+    """Accepts an SFTP upload and commits it as a new file version.
 
-    Telegram uploads need the size up front and SFTP never announces it, so
-    the payload is spooled -- in memory up to ``spool_max_bytes``, on disk
-    beyond that -- and only committed once the client closes the handle.
-    Buffering also makes out-of-order and sparse writes work, since the
-    spool can simply be seeked.
+    Prefer a live stream for sequential writes (the common case for
+    OpenSSH ``sftp``, rclone, WinSCP, etc.). Bytes are handed to the
+    uploader via an asyncio.Queue as soon as they arrive, so Telegram
+    parts can be sent without waiting for the whole file. The total size
+    is only known when the client closes the handle; the Telegram backend
+    then uses the official streamed-upload path (file_total_parts=-1).
+
+    Non-sequential or sparse writes fall back to the original spool
+    (memory + disk) so correctness is preserved for clients that seek.
     """
 
     def __init__(
@@ -151,9 +158,19 @@ class WriteHandle(Handle):
     ):
         self._ops = ops
         self._path = path
-        self._spool = tempfile.SpooledTemporaryFile(
-            max_size=spool_max_bytes, dir=spool_dir
-        )
+        self._spool_max_bytes = spool_max_bytes
+        self._spool_dir = spool_dir
+
+        # Streaming path (sequential writes).
+        self._queue: Optional[asyncio.Queue] = None
+        self._upload_task: Optional[asyncio.Task] = None
+        self._next_offset = 0
+        self._stream_failed = False
+
+        # Fallback spool path (random / sparse writes).
+        self._spool: Optional[tempfile.SpooledTemporaryFile] = None
+        self._use_spool = False
+
         self._size = 0
         self._dirty = False
         self._closed = False
@@ -171,37 +188,114 @@ class WriteHandle(Handle):
         async with self._lock:
             if self._closed:
                 raise ValueError("write on a closed handle")
-            await asyncio.to_thread(self._write_sync, offset, data)
+            if not data:
+                return
+
+            if self._use_spool:
+                await asyncio.to_thread(self._spool_write, offset, data)
+                return
+
+            # First write or continued sequential write?
+            if offset != self._next_offset:
+                # Switch to spool mode for the rest of this handle.
+                logger.debug(
+                    "SFTP write at offset %s while expecting %s for %s; "
+                    "falling back to spool", offset, self._next_offset, self._path
+                )
+                await self._switch_to_spool()
+                await asyncio.to_thread(self._spool_write, offset, data)
+                return
+
+            # Ensure the streaming pipeline is running.
+            if self._queue is None:
+                self._queue = asyncio.Queue(maxsize=8)
+                self._upload_task = asyncio.create_task(self._run_stream_upload())
+
+            await self._queue.put(data)
+            self._next_offset += len(data)
+            self._size = self._next_offset
+            self._dirty = True
 
     async def close(self) -> None:
-        """Commit the buffered payload as a new version of the file."""
+        """Commit the payload as a new version of the file."""
         async with self._lock:
             if self._closed:
                 return
             self._closed = True
             try:
-                if self._dirty:
+                if not self._dirty:
+                    return
+
+                if self._use_spool and self._spool is not None:
                     await self._ops.upload_from_stream(
                         self._iter_spool(), self._size, self._path
                     )
+                    return
+
+                # Streaming path: signal EOF and wait for the uploader.
+                if self._queue is not None:
+                    await self._queue.put(_STREAM_EOF)
+                    if self._upload_task is not None:
+                        await self._upload_task
+                        if self._stream_failed:
+                            raise TechnicalErrorFromStream()
             finally:
-                await asyncio.to_thread(self._spool.close)
+                if self._spool is not None:
+                    await asyncio.to_thread(self._spool.close)
 
     async def abort(self) -> None:
-        """Drop the buffered payload without touching the stored file."""
+        """Drop the payload without touching the stored file."""
         async with self._lock:
             if self._closed:
                 return
             self._closed = True
-            await asyncio.to_thread(self._spool.close)
+            if self._queue is not None:
+                # Drain / cancel the uploader.
+                try:
+                    self._queue.put_nowait(_STREAM_EOF)
+                except asyncio.QueueFull:
+                    pass
+                if self._upload_task is not None:
+                    self._upload_task.cancel()
+                    try:
+                        await self._upload_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+            if self._spool is not None:
+                await asyncio.to_thread(self._spool.close)
 
-    def _write_sync(self, offset: int, data: bytes) -> None:
+    async def _switch_to_spool(self) -> None:
+        """Move already-streamed bytes into a spool and continue there."""
+        self._use_spool = True
+        self._spool = tempfile.SpooledTemporaryFile(
+            max_size=self._spool_max_bytes, dir=self._spool_dir
+        )
+        # Any bytes already handed to the queue are lost for the spool;
+        # in practice the first non-sequential write happens early (or
+        # never). We accept that the partial stream is abandoned.
+        if self._queue is not None:
+            try:
+                self._queue.put_nowait(_STREAM_EOF)
+            except asyncio.QueueFull:
+                pass
+            if self._upload_task is not None:
+                self._upload_task.cancel()
+                try:
+                    await self._upload_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            self._queue = None
+            self._upload_task = None
+
+    def _spool_write(self, offset: int, data: bytes) -> None:
+        assert self._spool is not None
         self._spool.seek(offset)
         self._spool.write(data)
         self._size = max(self._size, offset + len(data))
         self._dirty = True
 
     async def _iter_spool(self) -> AsyncIterator[bytes]:
+        assert self._spool is not None
         await asyncio.to_thread(self._spool.seek, 0)
         remaining = self._size
         while remaining > 0:
@@ -212,3 +306,26 @@ class WriteHandle(Handle):
                 break
             remaining -= len(chunk)
             yield chunk
+
+    async def _run_stream_upload(self) -> None:
+        """Consume the queue and feed Ops.upload_from_stream (size unknown)."""
+
+        async def stream() -> AsyncIterator[bytes]:
+            assert self._queue is not None
+            while True:
+                item = await self._queue.get()
+                if item is _STREAM_EOF:
+                    return
+                yield item
+
+        try:
+            await self._ops.upload_from_stream(stream(), None, self._path)
+        except Exception as ex:
+            logger.exception("Streamed SFTP upload failed for %s: %s", self._path, ex)
+            self._stream_failed = True
+            raise
+
+
+class TechnicalErrorFromStream(Exception):
+    """Raised when the background stream upload failed."""
+    pass

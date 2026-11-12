@@ -1,7 +1,7 @@
 import datetime
 import os.path
 from contextlib import AbstractAsyncContextManager, nullcontext
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 from tgdcfs.errors import FileOrDirectoryDoesNotExist, InvalidPath
 from tgdcfs.reqres import (
@@ -203,9 +203,12 @@ class Ops:
     async def _upload(
         self, dirname: str, file_msg: UploadableFileMessage
     ) -> TGFSFileDesc:
+        size = file_msg.get_size()
+        # Task tracker accepts 0 when size is still unknown; progress is
+        # reported via size_delta as parts arrive.
         task_tracker = await create_upload_task(
             f"/{self._client.name}{dirname}/{file_msg.name}",
-            file_msg.get_size(),
+            size if size is not None else 0,
         )
 
         file_msg.task_tracker = task_tracker
@@ -245,8 +248,17 @@ class Ops:
         )
 
     async def upload_from_stream(
-        self, stream: AsyncIterator[bytes], size: int, remote: str
+        self,
+        stream: AsyncIterator[bytes],
+        size: Optional[int],
+        remote: str,
     ) -> TGFSFileDesc:
+        """Upload from an async iterator.
+
+        ``size`` may be ``None`` when the total length is not known in
+        advance (SFTP, certain pipes). The Telegram backend then uses the
+        official streamed-upload path.
+        """
         self._validate_path(remote)
         dirname, basename = os.path.dirname(remote), os.path.basename(remote)
 
