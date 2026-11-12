@@ -3,7 +3,7 @@ import errno
 import logging
 import os
 import tempfile
-from typing import AsyncIterator, Optional
+from typing import Any, AsyncIterator, Optional
 
 from tgdcfs.core import Ops
 
@@ -168,7 +168,7 @@ class WriteHandle(Handle):
         self._stream_failed = False
 
         # Fallback spool path (random / sparse writes).
-        self._spool: Optional[tempfile.SpooledTemporaryFile] = None
+        self._spool: Optional[tempfile.SpooledTemporaryFile[Any]] = None
         self._use_spool = False
 
         self._size = 0
