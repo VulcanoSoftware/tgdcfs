@@ -154,7 +154,7 @@ class TestWriteHandle:
         await handle.write(4, b"tail")
         await handle.close()
 
-        assert ops.uploaded["/file.bin"] == b"\\x00\\x00\\x00\\x00tail"
+        assert ops.uploaded["/file.bin"] == b"\x00\x00\x00\x00tail"
 
     async def test_payload_larger_than_the_spool_is_uploaded_intact(self, ops):
         payload = bytes(range(256)) * 512  # 128 KiB, well past the spool limit
