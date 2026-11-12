@@ -80,6 +80,8 @@ tgdcfs:
     # authorized_keys_dir: sftp_authorized_keys
     # upload_buffer_size_mb: 64
     # upload_buffer_dir: ''
+    # write_behind: false         # answer an upload once it is buffered
+    # write_behind_max_mb: 2048   # most data held back this way, 0 = no cap
 ```
 
 Both interfaces run in the same process and go through the same core, so
@@ -120,6 +122,34 @@ held in memory up to `upload_buffer_size_mb` (default 64) and spills to
 Plan for that much scratch space when pushing large files. A transfer that
 is cut off mid-flight is discarded rather than committed, so an interrupted
 upload never truncates an existing file.
+
+**Why an SFTP upload feels like two uploads.** WebDAV announces the size of a
+file (`Content-Length`), so the bytes can go to Telegram while they arrive.
+SFTP cannot, so the file is first received in full and only sent on when the
+client closes it -- and the client waits, idle at 100%, for the answer to
+that close. For a large file that wait is as long as the transfer itself, and
+clients with an inactivity timeout (FileZilla: 20 seconds) drop the
+connection and start over. Setting `write_behind: true` answers the close as
+soon as the file is buffered and finishes the upload to Telegram in the
+background:
+
+* `stat`, listings and reads show the new file at once, served from the
+  buffer until the stores have it, so clients that verify an upload
+  (`rclone`, `rsync`) are satisfied;
+* removing or renaming a file (or a folder containing one) waits for its
+  upload to finish, so a deleted file does not come back;
+* `write_behind_max_mb` caps the data held back; a close that would exceed it
+  is answered only once earlier uploads have finished, so a client that is
+  faster than Telegram is slowed down instead of filling the disk. A single
+  file larger than the cap is accepted when nothing else is pending;
+* on shutdown the server finishes the pending uploads first.
+
+The trade-off is durability: a file is only in the stores once its background
+upload is done. A crash or hard restart before that loses it, and a failed
+upload is logged (and shown in the task list) instead of being reported to
+the client. WebDAV does not see a file until it is in the stores. For
+durability across restarts use `write_ack: cache` on the file system, which
+does the same for WebDAV and SFTP with the data on disk. Off by default.
 
 **Known limits**, all of them shared with the WebDAV interface: files
 cannot be appended to or partially updated (every write stores a new

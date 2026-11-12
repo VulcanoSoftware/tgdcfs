@@ -7,6 +7,8 @@ from typing import AsyncIterator, Optional
 
 from tgdcfs.core import Ops
 
+from .pending import PendingUpload, PendingUploads
+
 logger = logging.getLogger(__name__)
 
 SEEK_DATA = getattr(os, "SEEK_DATA", 3)
@@ -132,6 +134,37 @@ class ReadHandle(Handle):
             return b""
 
 
+class SpoolReadHandle(Handle):
+    """Reads a file whose upload has been acknowledged but not finished yet.
+
+    With ``sftp.write_behind`` the stores do not have the file for a while
+    after the client closed it, but the client may well read it straight
+    back (``rsync`` and ``rclone`` verify what they wrote). The spool is
+    complete and seekable, so it serves that directly.
+    """
+
+    def __init__(self, pending: PendingUpload):
+        self._pending: Optional[PendingUpload] = pending
+        self._size = pending.size
+        pending.retain()
+
+    @property
+    def size(self) -> int:
+        return self._size
+
+    async def read(self, offset: int, size: int) -> bytes:
+        """Return up to ``size`` bytes at ``offset``; empty bytes mean EOF."""
+        if size <= 0 or offset >= self._size or self._pending is None:
+            return b""
+        size = min(size, self._size - offset)
+        return await asyncio.to_thread(self._pending.read_at, offset, size)
+
+    async def close(self) -> None:
+        pending, self._pending = self._pending, None
+        if pending is not None:
+            pending.release()
+
+
 class WriteHandle(Handle):
     """Buffers an SFTP upload until its total size is known.
 
@@ -140,6 +173,11 @@ class WriteHandle(Handle):
     beyond that -- and only committed once the client closes the handle.
     Buffering also makes out-of-order and sparse writes work, since the
     spool can simply be seeked.
+
+    Committing means uploading to the stores, which takes as long again as
+    the client needed to send the data, and the client waits for the answer
+    to its CLOSE meanwhile. With a ``pending`` registry the finished spool
+    is handed over to it instead and the CLOSE is answered right away.
     """
 
     def __init__(
@@ -148,9 +186,13 @@ class WriteHandle(Handle):
         path: str,
         spool_max_bytes: int,
         spool_dir: Optional[str] = None,
+        pending: Optional[PendingUploads] = None,
+        client_name: str = "",
     ):
         self._ops = ops
         self._path = path
+        self._pending = pending
+        self._client_name = client_name
         self._spool = tempfile.SpooledTemporaryFile(
             max_size=spool_max_bytes, dir=spool_dir
         )
@@ -179,13 +221,24 @@ class WriteHandle(Handle):
             if self._closed:
                 return
             self._closed = True
+            handed_over = False
             try:
-                if self._dirty:
+                if self._dirty and self._pending is not None:
+                    await self._pending.submit(
+                        self._ops,
+                        self._client_name,
+                        self._path,
+                        self._spool,
+                        self._size,
+                    )
+                    handed_over = True
+                elif self._dirty:
                     await self._ops.upload_from_stream(
                         self._iter_spool(), self._size, self._path
                     )
             finally:
-                await asyncio.to_thread(self._spool.close)
+                if not handed_over:
+                    await asyncio.to_thread(self._spool.close)
 
     async def abort(self) -> None:
         """Drop the buffered payload without touching the stored file."""

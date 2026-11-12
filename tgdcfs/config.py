@@ -252,6 +252,19 @@ class SFTPConfig:
     directory when empty). SFTP never announces the file size up front
     while Telegram uploads need it, so a whole file has to be buffered
     before it can be sent.
+
+    That buffering makes an upload take twice: the client first sends the
+    file here, and only when it closes the file does the upload to
+    Telegram start, while the client waits at 100% for the answer (and
+    some clients give up after 20 seconds of silence and start over).
+    ``write_behind`` answers the close as soon as the file is buffered and
+    finishes the upload in the background. Reads, ``stat`` and listings
+    already show the new file, but it is only safe in the stores once the
+    background upload is done: a crash or restart before that loses it,
+    and a failure is logged instead of reported to the client. Off by
+    default. ``write_behind_max_mb`` caps the data held back this way
+    (``0`` means no cap); a close that would exceed it is answered only
+    once earlier uploads have finished.
     """
 
     enabled: bool
@@ -261,14 +274,21 @@ class SFTPConfig:
     authorized_keys_dir: Optional[str]
     upload_buffer_size_mb: int
     upload_buffer_dir: Optional[str]
+    write_behind: bool = False
+    write_behind_max_mb: int = 2048
 
     DEFAULT_PORT = 2222
+    DEFAULT_WRITE_BEHIND_MAX_MB = 2048
     DEFAULT_HOST_KEY_FILE = "sftp_host_key"
     DEFAULT_UPLOAD_BUFFER_SIZE_MB = 64
 
     @property
     def upload_buffer_size_bytes(self) -> int:
         return self.upload_buffer_size_mb * 1024 * 1024
+
+    @property
+    def write_behind_max_bytes(self) -> int:
+        return self.write_behind_max_mb * 1024 * 1024
 
     @classmethod
     def from_dict(cls, data: Optional[dict]) -> "SFTPConfig":
@@ -284,6 +304,15 @@ class SFTPConfig:
         if buffer_size_mb < 0:
             raise ValueError(
                 f"sftp.upload_buffer_size_mb must not be negative, got {buffer_size_mb}"
+            )
+
+        write_behind_max_mb = int(
+            data.get("write_behind_max_mb", cls.DEFAULT_WRITE_BEHIND_MAX_MB)
+        )
+        if write_behind_max_mb < 0:
+            raise ValueError(
+                f"sftp.write_behind_max_mb must not be negative, "
+                f"got {write_behind_max_mb}"
             )
 
         return cls(
@@ -304,6 +333,8 @@ class SFTPConfig:
                 if data.get("upload_buffer_dir")
                 else None
             ),
+            write_behind=bool(data.get("write_behind", False)),
+            write_behind_max_mb=write_behind_max_mb,
         )
 
 

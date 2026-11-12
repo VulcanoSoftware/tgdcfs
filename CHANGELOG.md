@@ -18,6 +18,19 @@ the fact on the commits that shipped them.
 
 ### Added
 
+- `tgdcfs.sftp.write_behind` (default `false`) and `write_behind_max_mb`
+  (default `2048`, `0` for no cap). An SFTP upload is received in full
+  before it goes to Telegram, because SFTP never announces the file size,
+  and the client waits for the answer to its close in the meantime: the
+  upload takes twice as long as over WebDAV, and clients with an inactivity
+  timeout (FileZilla: 20 seconds) give up and upload again. With
+  `write_behind` the close is answered once the file is buffered and the
+  upload finishes in the background. Stat, listings and reads already show
+  the file, remove and rename wait for its upload, and the data held back is
+  capped. The file is only in the stores once the background upload is
+  done, so a crash before that loses it; see "Uploads are buffered" in the
+  README.
+
 - This changelog, SemVer release tags and GitHub releases. A pushed tag
   `vX.Y.Z` publishes the release notes from this file and adds the version
   tags to the Docker images of that commit.

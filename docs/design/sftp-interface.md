@@ -104,6 +104,49 @@ aborts anything still open rather than closing it.
 `Ops.touch()` is called at open time so the name shows up in a listing
 while the upload is still running, matching the WebDAV `PUT` path.
 
+#### Why it feels like two uploads, and write-behind
+
+The spool makes an upload serial where WebDAV's is pipelined. WebDAV knows
+the size from `Content-Length`, so `Ops.upload_from_stream` runs while the
+body is still arriving. SFTP only learns the size at CLOSE, so the stores
+get the first byte after the client has sent the last one, and the client
+waits for the answer to that CLOSE the whole time. The wait grows with the
+file, and a client with an inactivity timeout gives up and re-uploads.
+
+The size cannot be recovered earlier. Clients do not announce it (OpenSSH
+strips the size from the attributes of OPEN on purpose), and cutting the
+stream into parts of a fixed size to upload those while receiving would
+change the stored layout of every SFTP upload for the benefit of files above
+the part size only (the part size is 2 GB). What can be changed is who
+waits: `sftp.write_behind` answers the CLOSE once the spool is complete.
+
+`PendingUploads` (`pending.py`) takes the finished spool and uploads it in a
+background task. Until that is done it is the registry the SFTP layer asks
+first:
+
+* `stat`/listing report the spooled size, and `open` for reading serves
+  from the spool (`SpoolReadHandle`), otherwise the placeholder created at
+  open time -- empty -- would be what a client verifying its upload sees;
+* remove and rename wait for pending uploads of the path (below it, for a
+  folder), otherwise the upload would land after the removal and bring the
+  file back, or write to the old name after the move;
+* two uploads of one path run in the order they were closed;
+* the spool is reference counted between the upload and any read handle, and
+  closed when the last of them lets go;
+* the data held back is capped (`write_behind_max_mb`): `submit` waits for
+  room, which delays the CLOSE and so pushes back on a client that is faster
+  than Telegram. A file larger than the cap is let through when nothing else
+  is pending, so the cap cannot deadlock;
+* `main()` drains the registry after the listener is closed.
+
+The cost is the point where the client is told "done": the data is only in a
+spool, in memory or a temp file, not in a store. A crash loses it; a failure
+is logged and marked failed in the task list, not returned to the client. It
+is therefore opt-in, and `write_ack: cache`, which keeps the bytes on the
+data volume and survives a restart, stays the durable alternative. Only SFTP
+sessions of this process see a pending file; WebDAV sees it once it is
+stored.
+
 ## Lifecycle
 
 `start_sftp_server()` returns `None` when disabled and otherwise an
@@ -121,7 +164,8 @@ clients refuse to connect.
 
 All of these are shared with WebDAV and documented in the README:
 
-* uploads need scratch space the size of the file;
+* uploads need scratch space the size of the file, and take the transfer
+  time twice unless `write_behind` is on (which trades durability, above);
 * no append and no partial update — every write stores a new version;
 * moving between two clients is refused;
 * no symlinks and no real permissions; `setstat` accepts and ignores, since

@@ -17,7 +17,7 @@ from uvicorn.config import Config as UvicornConfig
 from uvicorn.server import Server
 
 from tgdcfs.app import create_app
-from tgdcfs.app.sftp import start_sftp_server
+from tgdcfs.app.sftp import create_pending_uploads, start_sftp_server
 from tgdcfs.backends.base import IStore
 from tgdcfs.backends.discord import factory as discord
 from tgdcfs.backends.telegram import factory as telegram
@@ -138,8 +138,9 @@ async def main():
     app = create_app(clients, config, replication=replication, cache=cache)
     sweeper = start_cache_sweeper(cache, replication)
 
+    pending_uploads = create_pending_uploads(config)
     try:
-        sftp_acceptor = await start_sftp_server(clients, config)
+        sftp_acceptor = await start_sftp_server(clients, config, pending_uploads)
     except Exception as ex:
         # A broken SFTP setup (port taken, unwritable host key) must not keep
         # the HTTP interface from coming up.
@@ -162,6 +163,9 @@ async def main():
         if sftp_acceptor:
             sftp_acceptor.close()
             await sftp_acceptor.wait_closed()
+        if pending_uploads is not None:
+            # Uploads the SFTP clients were already told are done.
+            await pending_uploads.drain()
 
 
 if __name__ == "__main__":
