@@ -290,6 +290,12 @@ class WriteHandle(Handle):
     def _spool_write(self, offset: int, data: bytes) -> None:
         if self._spool is None:
             raise RuntimeError("spool not initialized")
+        # Explicitly zero-fill gaps so sparse SFTP writes match the
+        # expected solid file (SpooledTemporaryFile seek alone is not
+        # guaranteed to materialize zeros on every platform).
+        if offset > self._size:
+            self._spool.seek(self._size)
+            self._spool.write(b"\x00" * (offset - self._size))
         self._spool.seek(offset)
         self._spool.write(data)
         self._size = max(self._size, offset + len(data))
