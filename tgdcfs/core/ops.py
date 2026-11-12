@@ -203,9 +203,10 @@ class Ops:
     async def _upload(
         self, dirname: str, file_msg: UploadableFileMessage
     ) -> TGFSFileDesc:
+        size = file_msg.get_size()
         task_tracker = await create_upload_task(
             f"/{self._client.name}{dirname}/{file_msg.name}",
-            file_msg.get_size(),
+            size if size >= 0 else None,
         )
 
         file_msg.task_tracker = task_tracker

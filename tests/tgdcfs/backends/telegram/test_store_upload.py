@@ -14,7 +14,11 @@ from tgdcfs.backends.telegram.store import (
     TelegramStore,
 )
 from tgdcfs.errors import TechnicalError
-from tgdcfs.reqres import SentFileMessage, UploadableFileMessage
+from tgdcfs.reqres import (
+    FileMessageFromStream,
+    SentFileMessage,
+    UploadableFileMessage,
+)
 
 
 class MockFileMessage(UploadableFileMessage):
@@ -307,6 +311,44 @@ class TestUpload:
         assert result[0].size == 1000
         mock_uploader.upload.assert_awaited_once()
         mock_uploader.send.assert_awaited_once_with(123456789)
+
+    @pytest.mark.asyncio
+    async def test_unknown_size_stream_is_split_without_spooling(
+        self, store, mock_uploader, mocker
+    ):
+        from tgdcfs.backends.telegram import store as telegram_store
+
+        mocker.patch.object(telegram_store, "PART_SIZE_DEFAULT", 4)
+
+        async def source():
+            yield b"abc"
+            yield b"defghij"
+
+        file_msg = FileMessageFromStream.new(
+            stream=source(), size=-1, name="unknown.bin"
+        )
+        uploaded_parts = []
+
+        async def upload_part(part_msg, use_account_api):
+            await part_msg.open()
+            data = bytearray()
+            while chunk := await part_msg.read(2):
+                data.extend(chunk)
+            await part_msg.close()
+            uploaded_parts.append((part_msg.name, bytes(data)))
+            return mock_uploader, len(data)
+
+        mocker.patch.object(store, "_upload_part", side_effect=upload_part)
+
+        result = await store.upload(file_msg)
+
+        assert uploaded_parts == [
+            ("[part1]unknown.bin", b"abcd"),
+            ("[part2]unknown.bin", b"efgh"),
+            ("[part3]unknown.bin", b"ij"),
+        ]
+        assert len(result) == 3
+        assert mock_uploader.send.await_count == 3
 
     @pytest.mark.asyncio
     async def test_upload_multiple_part_file(self, store, mock_uploader):

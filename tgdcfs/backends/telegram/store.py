@@ -423,6 +423,76 @@ class TelegramStore(MessageBroker, IStore):
         part_size, _ = self._part_size_for(size)
         return list(self._partition(size, part_size))
 
+    async def _upload_unknown_size(
+        self, file_msg: UploadableFileMessage
+    ) -> List[SentFileMessage]:
+        """Stream an unknown-length source into bounded Telegram documents.
+
+        Telegram still limits each document to one upload size. A one-byte
+        lookahead determines whether another document is needed without
+        buffering the complete file or emitting an empty trailing document.
+        """
+        use_account_api = self._premium_upload and self.tdlib.account is not None
+        part_size = PART_SIZE_PREMIUM if use_account_api else PART_SIZE_DEFAULT
+        file_name = file_msg.file_name()
+        buffer = bytearray()
+        eof = False
+        sends: List[asyncio.Task[SentFileMessage]] = []
+
+        async def read_source(length: int) -> bytes:
+            nonlocal eof
+            while len(buffer) < length and not eof:
+                chunk = await file_msg.read(min(512 * 1024, length - len(buffer)))
+                if not chunk:
+                    eof = True
+                    break
+                buffer.extend(chunk)
+            result = bytes(buffer[:length])
+            del buffer[: len(result)]
+            return result
+
+        async def part_stream() -> AsyncIterator[bytes]:
+            remaining = part_size
+            while remaining:
+                chunk = await read_source(min(512 * 1024, remaining))
+                if not chunk:
+                    return
+                remaining -= len(chunk)
+                yield chunk
+
+        await file_msg.open()
+        try:
+            index = 0
+            while True:
+                part_name = f"[part{index + 1}]{file_name}"
+                part_msg = FileMessageFromStream.new(
+                    stream=part_stream(), size=-1, name=part_name
+                )
+                part_msg.task_tracker = file_msg.task_tracker
+                uploader, uploaded_size = await self._upload_part(
+                    part_msg, use_account_api=use_account_api
+                )
+                sends.append(
+                    asyncio.create_task(
+                        self._send_uploaded(uploader, uploaded_size, part_name)
+                    )
+                )
+
+                # If a byte exists beyond this document, keep it for the
+                # next part. Otherwise this was the final document.
+                next_byte = await read_source(1)
+                if not next_byte:
+                    break
+                buffer[:0] = next_byte
+                index += 1
+            return list(await asyncio.gather(*sends))
+        except BaseException:
+            for task in sends:
+                task.cancel()
+            await asyncio.gather(*sends, return_exceptions=True)
+            raise
+        finally:
+            await file_msg.close()
     async def upload(self, file_msg: UploadableFileMessage) -> List[SentFileMessage]:
         """Upload ``file_msg`` in parts of at most one Telegram document.
 
@@ -440,6 +510,9 @@ class TelegramStore(MessageBroker, IStore):
         """
         size = file_msg.get_size()
         file_name = file_msg.name or "unnamed"
+        if size < 0:
+            return await self._upload_unknown_size(file_msg)
+
         part_size, premium_upload = self._part_size_for(size)
         parts = list(self._partition(size, part_size))
 

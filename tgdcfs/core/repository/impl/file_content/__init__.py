@@ -112,6 +112,7 @@ class StoreFileContentRepository(IFileContentRepository):
             self._cache is not None
             and self._cache.config.stage_uploads
             and version_id
+            and file_msg.get_size() >= 0
             and self._mirror_group is not None
             and not self._tee_mirroring
         ):
@@ -126,7 +127,11 @@ class StoreFileContentRepository(IFileContentRepository):
         # it from the primary again (``sync: tee``): their uploads run
         # while the primary's does, fed by the reads it takes.
         tee = None
-        if self._tee_mirroring and self._mirror_group is not None:
+        if (
+            self._tee_mirroring
+            and self._mirror_group is not None
+            and file_msg.get_size() >= 0
+        ):
             tee = self._mirror_group.tee(file_msg, self._tee_buffer)
             if tee is not None:
                 file_msg = tee.message
@@ -191,6 +196,10 @@ class StoreFileContentRepository(IFileContentRepository):
         if self._cache is None:
             return None
         size = file_msg.get_size()
+        if size < 0:
+            # Unknown-length streams cannot reserve a correctly sized cache
+            # entry. Let the primary store consume the stream directly.
+            return None
         writer = self._cache.open_staging(self._cache_scope, version_id, size)
         if writer is None:
             return None
