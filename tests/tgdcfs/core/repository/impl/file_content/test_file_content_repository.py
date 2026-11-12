@@ -20,7 +20,7 @@ class MockFileMessage(UploadableFileMessage):
         self._task_tracker = None
 
     def get_size(self) -> int:
-        return self.size
+        return self.size if self.size is not None else 0
 
     def next_part(self, size: int):
         self._offset += size

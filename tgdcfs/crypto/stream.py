@@ -101,7 +101,7 @@ class EncryptingFileMessage(UploadableFileMessage):
     def _get_size(self) -> int:
         # ``size`` is set explicitly in ``wrap`` and never falls back here,
         # but the protocol requires this method to exist.
-        return self.size
+        return self.size if self.size is not None else 0
 
     async def open(self) -> None:
         await self.inner.open()

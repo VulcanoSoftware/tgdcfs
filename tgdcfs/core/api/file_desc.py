@@ -93,7 +93,9 @@ class FileDescApi:
         self, file_msg: UploadableFileMessage | FileMessageImported
     ) -> List[SentFileMessage]:
         if isinstance(file_msg, FileMessageImported):
-            return [SentFileMessage(file_msg.message_id, file_msg.size)]
+            # Imported messages always carry a known size.
+            size = file_msg.size if file_msg.size is not None else 0
+            return [SentFileMessage(file_msg.message_id, size)]
         return await self.__fc_repo.save(file_msg)
 
     async def append_file_version(
