@@ -5,7 +5,7 @@ import pytest
 
 from asgidav.app import create_app, extract_path_from_destination, split_path
 
-from .common import MockResource
+from .common import MockFolder, MockResource
 
 
 class TestAppHelpers:
@@ -133,3 +133,61 @@ class TestClientDisconnect:
         assert len(warnings) == 1
         assert "Client disconnected during PUT /big.bin" in warnings[0].message
         assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+class TestUnfinishedUploadIsDiscarded:
+    """A PUT creates the empty file first. When the body never arrives the
+    file must not stay behind as a 0 B file the client then asks about."""
+
+    async def _put(self, fail_with):
+        removed = []
+        state: dict = {"created": None}
+
+        class Res(MockResource):
+            async def overwrite(self, content, size):
+                raise fail_with
+
+            async def remove(self):
+                removed.append(self.path)
+
+        class Root(MockFolder):
+            async def create_empty_resource(self, path):
+                state["created"] = Res(path)
+                return state["created"]
+
+        root = Root("/")
+
+        async def get_member(path):
+            if path.strip("/") in ("", "."):
+                return root
+            return state["created"]
+
+        app = create_app(get_member)
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "PUT",
+            "scheme": "http",
+            "path": "/new.bin",
+            "raw_path": b"/new.bin",
+            "root_path": "",
+            "query_string": b"",
+            "headers": [(b"content-length", b"100")],
+            "client": ("127.0.0.1", 1234),
+            "server": ("127.0.0.1", 80),
+        }
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            pass
+
+        with pytest.raises(type(fail_with)):
+            await app(scope, receive, send)
+        return removed
+
+    @pytest.mark.asyncio
+    async def test_a_failed_write_removes_the_empty_file(self):
+        assert await self._put(RuntimeError("store down")) == ["new.bin"]

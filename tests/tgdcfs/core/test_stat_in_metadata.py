@@ -91,6 +91,7 @@ class TestFilling:
     async def test_the_first_listing_stores_the_stat(self, client, ops):
         await ops.upload_from_bytes(b"x" * 1234, "/a.txt")
         fr = ops.stat_file("/a.txt")
+        fr.stat = None  # an upload records it; start from a ref without one
         pushes = client.metadata_repo.pushes
 
         stat = await client.stats.get(fr)
@@ -105,6 +106,7 @@ class TestFilling:
     async def test_a_stored_stat_reads_no_descriptor(self, client, ops):
         await ops.upload_from_bytes(b"x" * 10, "/a.txt")
         fr = ops.stat_file("/a.txt")
+        fr.stat = None  # an upload records it; start from a ref without one
         await client.stats.get(fr)
         reads = client.fd_repo.reads
 
@@ -116,6 +118,7 @@ class TestFilling:
     async def test_concurrent_listings_read_the_descriptor_once(self, client, ops):
         await ops.upload_from_bytes(b"x" * 10, "/a.txt")
         fr = ops.stat_file("/a.txt")
+        fr.stat = None  # an upload records it; start from a ref without one
         reads = client.fd_repo.reads
 
         await asyncio.gather(*(client.stats.get(fr) for _ in range(5)))
@@ -126,6 +129,7 @@ class TestFilling:
     async def test_an_abandoned_listing_still_stores_what_it_read(self, client, ops):
         await ops.upload_from_bytes(b"x" * 77, "/a.txt")
         fr = ops.stat_file("/a.txt")
+        fr.stat = None  # an upload records it; start from a ref without one
         client.fd_repo.gate = asyncio.Event()
 
         listing = asyncio.ensure_future(client.stats.get(fr))
@@ -142,6 +146,7 @@ class TestFilling:
     async def test_an_unreadable_descriptor_is_not_stored(self, client, ops):
         await ops.upload_from_bytes(b"x" * 10, "/a.txt")
         fr = ops.stat_file("/a.txt")
+        fr.stat = None  # an upload records it; start from a ref without one
         del client.channel.messages[fr.message_id]
 
         stat = await client.stats.get(fr)
@@ -155,6 +160,7 @@ class TestFilling:
         ops = Ops(cast(Client, client))
         await ops.upload_from_bytes(b"x" * 10, "/a.txt")
         fr = ops.stat_file("/a.txt")
+        fr.stat = None  # an upload records it; start from a ref without one
         reads = client.fd_repo.reads
 
         await client.stats.get(fr)
@@ -164,22 +170,172 @@ class TestFilling:
         assert fr.stat is None
 
 
+class TestRecordedOnUpload:
+    @pytest.mark.asyncio
+    async def test_an_upload_keeps_its_stat(self, client, ops):
+        await ops.upload_from_bytes(b"x" * 321, "/a.txt")
+        fr = ops.stat_file("/a.txt")
+
+        assert fr.stat is not None and fr.stat.size == 321
+
+    @pytest.mark.asyncio
+    async def test_the_first_listing_reads_no_descriptor(self, client, ops):
+        for i in range(5):
+            await ops.upload_from_bytes(b"x" * 10, f"/f{i}.txt")
+        reads = client.fd_repo.reads
+
+        stats = [await client.stats.get(ops.stat_file(f"/f{i}.txt")) for i in range(5)]
+
+        assert [s.size for s in stats] == [10] * 5
+        assert client.fd_repo.reads == reads
+
+    @pytest.mark.asyncio
+    async def test_the_stats_of_uploads_are_written_to_the_metadata(self, client, ops):
+        await ops.upload_from_bytes(b"x" * 1234, "/a.txt")
+        pushes = client.metadata_repo.pushes
+
+        await settle(client)
+
+        assert client.metadata_repo.pushes > pushes
+        assert ops.stat_file("/a.txt").to_dict()["stat"]["size"] == 1234
+
+    @pytest.mark.asyncio
+    async def test_a_descriptor_that_reads_incomplete_is_still_kept(
+        self, client, ops, monkeypatch
+    ):
+        """What was just written is complete whatever a read would say."""
+        stat_of = client.stats.stat_of
+
+        async def incomplete(fd):
+            fd.complete = False
+            return await stat_of(fd)
+
+        monkeypatch.setattr(client.stats, "stat_of", incomplete)
+
+        await ops.upload_from_bytes(b"x" * 55, "/a.txt")
+
+        stat = ops.stat_file("/a.txt").stat
+        assert stat is not None and stat.size == 55
+
+    @pytest.mark.asyncio
+    async def test_a_skipped_stat_is_logged(self, client, ops, monkeypatch, caplog):
+        async def boom(fd):
+            raise RuntimeError("store unreachable")
+
+        monkeypatch.setattr(client.stats, "stat_of", boom)
+
+        await ops.upload_from_bytes(b"x" * 10, "/a.txt")
+
+        assert "Did not keep the stat of a.txt on upload" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_off_keeps_nothing(self):
+        client = StatClient(persist=False)
+        ops = Ops(cast(Client, client))
+        await ops.upload_from_bytes(b"x" * 10, "/a.txt")
+
+        assert ops.stat_file("/a.txt").stat is None
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_size_just_leaves_it_to_the_listing(
+        self, client, ops, monkeypatch
+    ):
+        async def boom(fd):
+            raise RuntimeError("store unreachable")
+
+        monkeypatch.setattr(client.stats, "stat_of", boom)
+
+        await ops.upload_from_bytes(b"x" * 10, "/a.txt")  # still succeeds
+
+        assert ops.stat_file("/a.txt").stat is None
+
+
+class TestWriteLoad:
+    @pytest.mark.asyncio
+    async def test_a_write_is_not_followed_at_once_by_another(
+        self, client, ops, monkeypatch
+    ):
+        """Writes happen on the one metadata writer that uploads need too."""
+        monkeypatch.setattr(stat_module, "FLUSH_DUTY", 4.0)
+        await ops.upload_from_bytes(b"x" * 10, "/a.txt")
+        await asyncio.sleep(0.05)  # the upload's own write
+        folder = ops.stat_file("/a.txt").location
+        starts: list[float] = []
+        ends: list[float] = []
+        save = client.metadata_api.save_stats
+
+        async def slow_save(directories, keep):
+            starts.append(asyncio.get_running_loop().time())
+            await asyncio.sleep(0.05)
+            await save(directories, keep)
+            ends.append(asyncio.get_running_loop().time())
+
+        monkeypatch.setattr(client.metadata_api, "save_stats", slow_save)
+
+        client.stats._mark(folder)
+        await asyncio.sleep(0.08)  # the first write is done
+        client.stats._mark(folder)
+        await asyncio.sleep(0.1)  # still inside the pause: 4 x 0.05 s
+        assert len(starts) == 1
+        await asyncio.sleep(0.2)
+
+        assert len(starts) == 2
+        assert starts[1] - ends[0] >= 0.18
+        await client.stats.close()
+
+    @pytest.mark.asyncio
+    async def test_missing_stats_are_read_a_few_at_a_time(
+        self, client, ops, monkeypatch
+    ):
+        monkeypatch.setattr(stat_module, "MAX_STAT_READS", 4)
+        client.stats._read_slots = asyncio.Semaphore(4)
+        refs = []
+        for i in range(20):
+            await ops.upload_from_bytes(b"x" * 10, f"/f{i}.txt")
+            fr = ops.stat_file(f"/f{i}.txt")
+            fr.stat = None
+            refs.append(fr)
+        running = peak = 0
+        read = client.fd_repo.get
+
+        async def counting_get(fr, include_all_versions=False, validate=True):
+            nonlocal running, peak
+            running += 1
+            peak = max(peak, running)
+            try:
+                await asyncio.sleep(0.01)
+                return await read(fr, include_all_versions, validate)
+            finally:
+                running -= 1
+
+        monkeypatch.setattr(client.fd_repo, "get", counting_get)
+
+        stats = await asyncio.gather(*(client.stats.get(fr) for fr in refs))
+
+        assert [s.size for s in stats] == [10] * 20
+        assert peak == 4
+        await settle(client)
+
+
 class TestChanges:
     @pytest.mark.asyncio
-    async def test_an_overwrite_drops_the_stat(self, client, ops):
+    async def test_an_overwrite_replaces_the_stat(self, client, ops):
         await ops.upload_from_bytes(b"x" * 10, "/a.txt")
         fr = ops.stat_file("/a.txt")
-        await client.stats.get(fr)
 
         await ops.upload_from_bytes(b"y" * 20, "/a.txt")
 
-        assert fr.stat is None
+        # Kept up to date, so a listing does not have to read the descriptor.
+        assert fr.stat is not None and fr.stat.size == 20
+        reads = client.fd_repo.reads
         assert (await client.stats.get(fr)).size == 20
+        assert client.fd_repo.reads == reads
 
     @pytest.mark.asyncio
     async def test_a_read_from_before_the_overwrite_is_not_stored(self, client, ops):
         await ops.upload_from_bytes(b"x" * 10, "/a.txt")
         fr = ops.stat_file("/a.txt")
+        fr.stat = None  # an upload records it; start from a ref without one
         client.fd_repo.gate = asyncio.Event()
         reads = client.fd_repo.reads
         listing = asyncio.ensure_future(client.stats.get(fr))
@@ -193,16 +349,19 @@ class TestChanges:
         assert fr.stat is None
 
     @pytest.mark.asyncio
-    async def test_a_new_date_drops_the_stat(self, client, ops):
+    async def test_a_new_date_replaces_the_stat(self, client, ops):
         import datetime
 
         await ops.upload_from_bytes(b"x" * 10, "/a.txt")
         fr = ops.stat_file("/a.txt")
-        await client.stats.get(fr)
 
+        # FileZilla: PUT, then PROPPATCH. The stat must survive the second.
         await ops.set_last_modified("/a.txt", datetime.datetime(2020, 1, 1))
 
-        assert fr.stat is None
+        assert fr.stat is not None and fr.stat.size == 10
+        reads = client.fd_repo.reads
+        await client.stats.get(fr)
+        assert client.fd_repo.reads == reads
 
     @pytest.mark.asyncio
     async def test_a_move_keeps_the_stat(self, client, ops):
@@ -247,6 +406,7 @@ class TestWriter:
         monkeypatch.setattr(stat_module, "FLUSH_MAX_DELAY", 3600.0)
         await ops.upload_from_bytes(b"x" * 10, "/a.txt")
         fr = ops.stat_file("/a.txt")
+        fr.stat = None  # an upload records it; start from a ref without one
         fail = {"left": 1}
         push = client.metadata_repo.push
 

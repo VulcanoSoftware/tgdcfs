@@ -30,7 +30,6 @@ from tgdcfs.reqres import (
     UploadableFileMessage,
 )
 
-
 # --- in-memory fake backend -------------------------------------------------
 
 
@@ -617,3 +616,31 @@ async def test_a_plaintext_read_passes_its_own_refusal_on() -> None:
 
     assert out == plaintext
     assert inner.admits == [False, False]
+
+
+async def test_a_file_just_written_needs_no_header_probe() -> None:
+    """A listing right after an upload must not read the file back.
+
+    The header is made while the file is written, under the version id the
+    descriptor will carry; without it the first PROPFIND of a folder of
+    freshly uploaded files probed every one of them from the store.
+    """
+    repo = _make_repo(chunk_size=4096)
+    inner: _InMemoryRepo = repo._inner  # type: ignore[assignment]
+    plaintext = os.urandom(4096 * 3 + 17)
+    file_msg = FileMessageFromBuffer.new(buffer=plaintext, name="test.bin")
+    file_msg.version_id = "v-new"
+    sent = await repo.save(file_msg)
+    fv = _FakeFileVersion(
+        id="v-new",
+        size=sum(m.size for m in sent),
+        message_ids=[m.message_id for m in sent],
+        part_sizes=[m.size for m in sent],
+    )
+    inner.admits.clear()
+
+    assert await repo.content_length(fv) == len(plaintext)
+    assert inner.admits == []  # nothing was read
+
+    out = await _collect(await repo.get(fv, 0, -1, "test.bin"))
+    assert out == plaintext

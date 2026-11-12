@@ -75,6 +75,9 @@ class TGFSFileRef:
     def delete(self) -> None:
         self.location.delete_file_ref(self)
 
+    async def delete_async(self) -> None:
+        await self.location.delete_file_ref_async(self)
+
 
 class FileRefList(list[TGFSFileRef]):
     """The file refs of a directory, with an index by name.
@@ -359,6 +362,39 @@ class TGFSDirectory:
             self.delete_file_ref(fr)
         except Exception:
             to.delete_file_ref(moved)
+            raise
+        return moved
+
+    # The ``*_async`` variants are what code running on the event loop calls.
+    # A plain directory does no I/O, so they are the sync methods; a directory
+    # backed by a remote repository overrides them to keep its blocking calls
+    # off the loop.
+
+    async def create_file_ref_async(
+        self, name: str, file_message_id: int
+    ) -> TGFSFileRef:
+        return self.create_file_ref(name, file_message_id)
+
+    async def delete_file_ref_async(self, fr: TGFSFileRef) -> None:
+        self.delete_file_ref(fr)
+
+    async def relocate_file_ref_async(
+        self, fr: TGFSFileRef, to: "TGFSDirectory", new_name: Optional[str] = None
+    ) -> TGFSFileRef:
+        """:meth:`relocate_file_ref` without blocking the event loop."""
+        name = new_name or fr.name
+        if to is self and name == fr.name:
+            return fr
+
+        moved = await to.create_file_ref_async(name, fr.message_id)
+        moved.mirrors = dict(fr.mirrors)
+        moved.store = fr.store
+        moved.stat = fr.stat
+        moved.stat_epoch = fr.stat_epoch
+        try:
+            await self.delete_file_ref_async(fr)
+        except Exception:
+            await to.delete_file_ref_async(moved)
             raise
         return moved
 

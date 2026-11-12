@@ -50,10 +50,13 @@ jobs:
           {
             echo "image=${image}"
             echo "tags=${REPOSITORY}:preview,${image}"
-            # Forks or PRs without write permissions/tokens on the target DockerHub repo
-            # have no access to valid push credentials; there the job still builds and smoke-tests,
-            # it just does not publish.
-            echo "can_push=$([ -n "${DOCKERHUB_TOKEN}" ] && [ -n "${DOCKERHUB_USERNAME}" ] && [ "${{ github.repository_owner }}" = "Xyvran" ] && echo true || echo false)"
+            # Publishing needs Docker Hub credentials. A repository without
+            # those secrets (a fork that never set them) still builds and
+            # smoke-tests, it just does not publish. The secrets are the
+            # whole check: this runs on `push`, where only the repository
+            # that owns them can read them, and a hard-coded owner name here
+            # kept every fork from publishing to its own Docker Hub.
+            echo "can_push=$([ -n "${DOCKERHUB_TOKEN}" ] && [ -n "${DOCKERHUB_USERNAME}" ] && echo true || echo false)"
           } >> "$GITHUB_OUTPUT"
 
       - name: Set up Buildx
