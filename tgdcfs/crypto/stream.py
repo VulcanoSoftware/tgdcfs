@@ -77,8 +77,14 @@ class EncryptingFileMessage(UploadableFileMessage):
             raise RuntimeError("serialized header has unexpected size")
 
         plaintext_size = inner.get_size()
-        ciphertext_size = HEADER_SIZE + ciphertext_size_for_plaintext(
-            plaintext_size, header.chunk_size
+        # Unknown-length streams use the backend's EOF-terminated upload
+        # protocol. Their ciphertext size becomes known only after the final
+        # plaintext chunk has been consumed.
+        ciphertext_size = (
+            -1
+            if plaintext_size < 0
+            else HEADER_SIZE
+            + ciphertext_size_for_plaintext(plaintext_size, header.chunk_size)
         )
 
         msg = cls(
@@ -134,7 +140,12 @@ class EncryptingFileMessage(UploadableFileMessage):
             # Refill the pending buffer with the next encrypted chunk.
             plaintext_chunk = await self._read_plaintext_chunk()
             if not plaintext_chunk:
-                # End of plaintext -- nothing more to emit.
+                # For an unknown-length stream, EOF is the first point at
+                # which we can calculate the final ciphertext size.
+                if self.size < 0:
+                    self.size = HEADER_SIZE + ciphertext_size_for_plaintext(
+                        self._plaintext_read, self.cipher.chunk_size
+                    )
                 break
 
             encrypted = self.cipher.encrypt_chunk(plaintext_chunk, self._chunk_index)
@@ -152,10 +163,12 @@ class EncryptingFileMessage(UploadableFileMessage):
         target = self.cipher.chunk_size
         buf = bytearray()
         remaining_plaintext = self.inner.get_size() - self._plaintext_read
-        if remaining_plaintext <= 0:
+        if remaining_plaintext == 0:
             return b""
 
-        want = min(target, remaining_plaintext)
+        # A negative size means the source is streamed until EOF. In that
+        # case ask for a full crypto chunk and let the source signal EOF.
+        want = target if remaining_plaintext < 0 else min(target, remaining_plaintext)
         while len(buf) < want:
             piece = await self.inner.read(want - len(buf))
             if not piece:
