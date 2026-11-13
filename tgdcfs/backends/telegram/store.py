@@ -5,27 +5,13 @@ import base64
 import gzip
 from pathlib import Path
 
-_dir = Path(__file__).parent
-_parts = [
-    "store.payload.part0",
-    "store.payload.part1",
-    "store.payload.part2",
-    "store.payload.part3",
-    "store.payload.part4",
-    "store.payload.part5",
-    "store.payload.part6",
-]
-_b64 = "".join((_dir / p).read_text() for p in _parts)
+# Load the real implementation into this module's globals so that:
+# - private helpers (_transfer, …) are visible and patchable by tests
+# - functions close over the real module dict (mocker.patch works)
+_payload = Path(__file__).parent
+_b64 = "".join(
+    (_payload / f"store.payload.part{i}").read_text() for i in range(7)
+)
 _src = gzip.decompress(base64.b64decode(_b64.encode("ascii")))
-_file = str(Path(__file__).resolve())
-_ns: dict = {
-    "__name__": __name__,
-    "__file__": _file,
-    "__package__": __package__,
-    "__builtins__": __builtins__,
-}
-exec(compile(_src, _file, "exec"), _ns)  # noqa: S102
-for _k, _v in _ns.items():
-    if not _k.startswith("_"):
-        globals()[_k] = _v
-del _dir, _parts, _b64, _src, _ns, _file, _k, _v, base64, gzip, Path
+exec(compile(_src, __file__, "exec"), globals())  # noqa: S102
+del _payload, _b64, _src, base64, gzip, Path
