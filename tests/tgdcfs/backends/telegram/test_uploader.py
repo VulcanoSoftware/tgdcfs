@@ -17,6 +17,7 @@ from tgdcfs.reqres import (
     SaveFilePartResp,
     SendMessageResp,
 )
+from tgdcfs.errors import TechnicalError
 from tgdcfs.tasks.integrations import TaskTracker
 from tgdcfs.backends.telegram.interface import ITDLibClient, TDLibApi
 
@@ -444,3 +445,190 @@ class TestConcurrencyAndWorkers:
         assert uploaded_size == len(test_data)
         # Should have made multiple calls due to chunking
         assert mock_client.save_file_part.call_count > 1
+
+
+class TestStreamedUpload:
+    """The streamed-upload rules for a length that is not known up front.
+
+    Per core.telegram.org/api/files#streamed-uploads: every part goes
+    through upload.saveBigFilePart with ``file_total_parts`` -1 until the
+    stream ends, the part it ends on carries the true count, and a stream
+    that ended exactly on a part boundary sends one last empty part
+    carrying it. The document is then sent as an inputFileBig.
+    """
+
+    @pytest.fixture
+    def mock_client(self, mocker):
+        client = mocker.AsyncMock(spec=ITDLibClient)
+        client.save_big_file_part = mocker.AsyncMock(
+            return_value=SaveFilePartResp(success=True)
+        )
+        client.save_file_part = mocker.AsyncMock(
+            return_value=SaveFilePartResp(success=True)
+        )
+        client.send_big_file = mocker.AsyncMock(
+            return_value=SendMessageResp(message_id=124)
+        )
+        client.send_small_file = mocker.AsyncMock(
+            return_value=SendMessageResp(message_id=123)
+        )
+        return client
+
+    @pytest.fixture
+    def small_parts(self, mocker):
+        """A 1 KiB part size and one worker, so order and counts are exact."""
+        config = mocker.Mock()
+        config.tgdcfs.transfer.upload_part_size_bytes = 1024
+        config.tgdcfs.transfer.upload_workers_small = 1
+        config.tgdcfs.transfer.upload_workers_big = 1
+        return mocker.patch(
+            "tgdcfs.backends.telegram.uploader.get_config", return_value=config
+        )
+
+    @pytest.fixture
+    def mock_task_tracker(self, mocker):
+        tracker = mocker.AsyncMock(spec=TaskTracker)
+        tracker.cancelled = mocker.AsyncMock(return_value=False)
+        tracker.update_progress = mocker.AsyncMock()
+        return tracker
+
+    @staticmethod
+    def _stream(chunks: list[bytes]):
+        async def gen():
+            for chunk in chunks:
+                yield chunk
+
+        return gen()
+
+    def _msg(self, chunks: list[bytes], name: str = "stream.bin"):
+        return FileMessageFromStream.new(
+            stream=self._stream(chunks), size=-1, name=name
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_stream_short_of_a_part_ends_on_the_true_count(
+        self, mock_client, small_parts
+    ):
+        payload = b"x" * 2048 + b"y" * 512
+        uploader = FileUploader(
+            mock_client, self._msg([payload[:1000], payload[1000:]])
+        )
+
+        assert await uploader.upload() == len(payload)
+
+        calls = sorted(
+            mock_client.save_big_file_part.call_args_list,
+            key=lambda c: c.args[0].file_part,
+        )
+        assert [c.args[0].file_part for c in calls] == [0, 1, 2]
+        assert [c.args[0].file_total_parts for c in calls] == [-1, -1, 3]
+        assert calls[-1].args[0].bytes == b"y" * 512
+        mock_client.save_file_part.assert_not_called()
+
+        await uploader.send(1)
+        assert mock_client.send_big_file.call_args.args[0].file.parts == 3
+
+    @pytest.mark.asyncio
+    async def test_a_stream_on_a_part_boundary_sends_one_last_empty_part(
+        self, mock_client, small_parts
+    ):
+        payload = b"x" * 2048
+        uploader = FileUploader(mock_client, self._msg([payload]))
+
+        assert await uploader.upload() == 2048
+
+        calls = mock_client.save_big_file_part.call_args_list
+        assert [c.args[0].file_part for c in calls] == [0, 1, 2]
+        assert [c.args[0].file_total_parts for c in calls] == [-1, -1, 2]
+        assert calls[-1].args[0].bytes == b""
+
+        await uploader.send(1)
+        assert mock_client.send_big_file.call_args.args[0].file.parts == 2
+
+    @pytest.mark.asyncio
+    async def test_one_small_chunk_is_a_single_part(self, mock_client, small_parts):
+        uploader = FileUploader(mock_client, self._msg([b"z" * 100]))
+
+        assert await uploader.upload() == 100
+
+        calls = mock_client.save_big_file_part.call_args_list
+        assert len(calls) == 1
+        assert calls[0].args[0].file_part == 0
+        assert calls[0].args[0].file_total_parts == 1
+        assert calls[0].args[0].bytes == b"z" * 100
+
+    @pytest.mark.asyncio
+    async def test_an_empty_stream_uploads_no_part(self, mock_client, small_parts):
+        uploader = FileUploader(mock_client, self._msg([b""]))
+
+        assert await uploader.upload() == 0
+
+        mock_client.save_big_file_part.assert_not_called()
+        await uploader.send(1)
+        assert mock_client.send_big_file.call_args.args[0].file.parts == 0
+
+    @pytest.mark.asyncio
+    async def test_the_task_tracker_sees_the_streamed_bytes(
+        self, mock_client, small_parts, mock_task_tracker
+    ):
+        payload = b"x" * 2048
+        file_msg = self._msg([payload])
+        file_msg.task_tracker = mock_task_tracker
+
+        uploader = FileUploader(mock_client, file_msg)
+        await uploader.upload()
+
+        deltas = [
+            call.kwargs["size_delta"]
+            for call in mock_task_tracker.update_progress.await_args_list
+        ]
+        assert sum(deltas) == len(payload)
+
+    @pytest.mark.asyncio
+    async def test_a_failed_part_fails_the_upload(
+        self, mock_client, small_parts, mocker, no_backoff
+    ):
+        mocker.patch(
+            "tgdcfs.backends.telegram.uploader.flood_wait_seconds",
+            return_value=None,
+        )
+        mock_client.save_big_file_part.return_value = SaveFilePartResp(success=False)
+
+        uploader = FileUploader(mock_client, self._msg([b"z" * 10]))
+
+        with pytest.raises(TechnicalError):
+            await uploader.upload()
+
+
+class TestStreamMessageOfUnknownLength:
+    """``FileMessageFromStream`` reads without a length."""
+
+    @staticmethod
+    def _stream(chunks: list[bytes]):
+        async def gen():
+            for chunk in chunks:
+                yield chunk
+
+        return gen()
+
+    def _msg(self, chunks: list[bytes]):
+        return FileMessageFromStream.new(stream=self._stream(chunks), size=-1)
+
+    @pytest.mark.asyncio
+    async def test_read_joins_chunks_up_to_the_request(self):
+        file_msg = self._msg([b"ab", b"cde", b"f"])
+        assert await file_msg.read(4) == b"abcd"
+        assert await file_msg.read(4) == b"ef"
+
+    @pytest.mark.asyncio
+    async def test_a_short_answer_only_comes_at_the_end(self):
+        file_msg = self._msg([b"abc"])
+        assert await file_msg.read(10) == b"abc"
+        assert await file_msg.read(10) == b""
+
+    @pytest.mark.asyncio
+    async def test_a_known_size_still_reads_exactly(self):
+        file_msg = FileMessageFromStream.new(
+            stream=self._stream([b"abc", b"de"]), size=5
+        )
+        assert await file_msg.read(10) == b"abcde"

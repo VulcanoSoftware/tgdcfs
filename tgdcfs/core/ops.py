@@ -247,6 +247,13 @@ class Ops:
     async def upload_from_stream(
         self, stream: AsyncIterator[bytes], size: int, remote: str
     ) -> TGFSFileDesc:
+        """Upload ``stream`` as a new version of ``remote``.
+
+        A ``size`` of -1 means the length is not known up front -- the
+        stores then take the stream as it comes; Telegram through its
+        streamed-upload rules, Discord as a plain stream of parts -- and
+        the version records the length the stream turned out to have.
+        """
         self._validate_path(remote)
         dirname, basename = os.path.dirname(remote), os.path.basename(remote)
 

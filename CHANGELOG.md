@@ -16,6 +16,26 @@ the fact on the commits that shipped them.
 
 ## [Unreleased]
 
+### Changed
+
+- **SFTP uploads now stream to the stores instead of being spooled.**
+  Files were buffered whole — in memory up to
+  `sftp.upload_buffer_size_mb`, on disk beyond that — before they were
+  committed on close. They are now piped to Telegram and Discord while
+  they arrive, in bounded memory, also when the file size is not known in
+  advance: Telegram through its streamed-upload rules
+  (core.telegram.org/api/files#streamed-uploads — every part through
+  `upload.saveBigFilePart` with `file_total_parts` -1, the part the
+  stream ends on carrying the true count), Discord as a plain stream of
+  parts. A write now waits when `sftp.upload_buffer_size_mb` is exceeded
+  (`0`, the old default meaning of "spill to disk immediately", disables
+  the limit), which holds back a client that writes faster than the
+  stores take. `sftp.upload_buffer_dir` is accepted but ignored: there
+  is no disk spool anymore. Writes are expected front to back — a chunk
+  arriving ahead of the stream is kept until the gap before it fills,
+  while a write behind what the upload already consumed, or a gap never
+  filled, fails the transfer instead of silently truncating the file.
+
 ### Added
 
 - This changelog, SemVer release tags and GitHub releases. A pushed tag

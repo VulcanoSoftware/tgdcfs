@@ -20,12 +20,15 @@ from typing import List, Optional
 import pytest
 
 from tgdcfs.core.repository.interface import IFileContentRepository
-from tgdcfs.crypto.cipher import CHUNK_OVERHEAD
-from tgdcfs.crypto.header import HEADER_SIZE, InvalidHeaderError
+from tgdcfs.crypto.cipher import CHUNK_OVERHEAD, ciphertext_size_for_plaintext
+from tgdcfs.crypto.header import HEADER_SIZE, FileHeader, InvalidHeaderError
+from tgdcfs.crypto.kdf import derive_file_key
 from tgdcfs.crypto.repository import EncryptingFileContentRepository
+from tgdcfs.crypto.stream import EncryptingFileMessage
 from tgdcfs.reqres import (
     FileContent,
     FileMessageFromBuffer,
+    FileMessageFromStream,
     SentFileMessage,
     UploadableFileMessage,
 )
@@ -70,16 +73,26 @@ class _InMemoryRepo(IFileContentRepository):
         await file_msg.open()
         try:
             buf = bytearray()
-            for read_size in (7, 4096, 8192, 1024 * 1024):
+            size = file_msg.get_size()
+            if size < 0:
+                # Unknown length, as a streamed upload has: read until
+                # the stream ends -- an empty answer means EOF.
                 while True:
-                    piece = await file_msg.read(read_size)
+                    piece = await file_msg.read(8192)
                     if not piece:
                         break
                     buf += piece
-                    if len(buf) >= file_msg.get_size():
+            else:
+                for read_size in (7, 4096, 8192, 1024 * 1024):
+                    while True:
+                        piece = await file_msg.read(read_size)
+                        if not piece:
+                            break
+                        buf += piece
+                        if len(buf) >= size:
+                            break
+                    if len(buf) >= size:
                         break
-                if len(buf) >= file_msg.get_size():
-                    break
         finally:
             await file_msg.close()
 
@@ -644,3 +657,90 @@ async def test_a_file_just_written_needs_no_header_probe() -> None:
 
     out = await _collect(await repo.get(fv, 0, -1, "test.bin"))
     assert out == plaintext
+
+
+# --- streamed (unknown-length) uploads --------------------------------------
+
+
+def _stream_of(data: bytes, piece: int = 3):
+    """An async iterator handing out ``data`` in small pieces."""
+
+    async def stream():
+        for i in range(0, len(data), piece):
+            yield data[i : i + piece]
+
+    return stream()
+
+
+@pytest.mark.parametrize(
+    "size",
+    [0, 1, 100, 4095, 4096, 4097, 4096 * 3, 4096 * 10 + 123],
+)
+async def test_unknown_size_round_trip(size: int) -> None:
+    """A stream whose length is not known up front encrypts and decrypts.
+
+    This is the SFTP shape: the bytes arrive before the total does. The
+    wrapper must not need the plaintext length -- the ciphertext it
+    produces is byte-for-byte what the sized path produces.
+    """
+    repo = _make_repo(chunk_size=4096)
+    plaintext = os.urandom(size)
+    file_msg = FileMessageFromStream.new(
+        stream=_stream_of(plaintext), size=-1, name="test.bin"
+    )
+    sent = await repo.save(file_msg)
+
+    expected_ct = HEADER_SIZE + ciphertext_size_for_plaintext(size, 4096)
+    assert sum(m.size for m in sent) == expected_ct
+
+    fv = _FakeFileVersion(
+        id="v1",
+        size=sum(m.size for m in sent),
+        message_ids=[m.message_id for m in sent],
+        part_sizes=[m.size for m in sent],
+    )
+    out = await _collect(await repo.get(fv, 0, -1, "test.bin"))
+    assert out == plaintext
+
+
+async def test_unknown_size_wrapper_reports_unknown_length() -> None:
+    """``wrap`` declares the ciphertext length unknown, not negative-zero.
+
+    The uploader picks its streamed mode on a negative size, so the
+    wrapper must pass the unknownness on rather than raising -- which is
+    what it did before, failing every encrypted SFTP upload with
+    "plaintext size negative: -1".
+    """
+    header = FileHeader.new(chunk_size=4096)
+    file_key = derive_file_key(b"\x77" * 32, header.file_salt)
+    inner = FileMessageFromStream.new(stream=_stream_of(b"hello"), size=-1)
+
+    encrypted = EncryptingFileMessage.wrap(inner, file_key, header)
+    assert encrypted.get_size() == -1
+
+    await encrypted.open()
+    try:
+        assert await encrypted.read(HEADER_SIZE) == encrypted.header_bytes
+        body = b""
+        while True:
+            piece = await encrypted.read(4096)
+            if not piece:
+                break
+            body += piece
+    finally:
+        await encrypted.close()
+    # One chunk of 5 plaintext bytes: 12 nonce + 5 ciphertext + 16 tag.
+    assert len(body) == 12 + 5 + 16
+
+
+async def test_unknown_size_stage_declined_without_raising() -> None:
+    """``stage`` on an unknown-length upload declines instead of blowing up.
+
+    The cache cannot charge a size it does not know; the caller then
+    uploads the usual way, exactly as for a too-large file.
+    """
+    repo = _make_repo(chunk_size=4096)
+    file_msg = FileMessageFromStream.new(
+        stream=_stream_of(b"x" * 100), size=-1, name="test.bin"
+    )
+    assert await repo.stage(file_msg, "v1") is None

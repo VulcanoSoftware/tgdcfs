@@ -1,3 +1,4 @@
+import asyncio
 import errno
 import os
 
@@ -126,67 +127,169 @@ class TestWriteHandle:
         ops.uploaded = {}
 
         async def upload_from_stream(stream, size, remote):
+            assert size == -1  # the length is not known up front
             data = b"".join([chunk async for chunk in stream])
-            assert len(data) == size
             ops.uploaded[remote] = data
 
         ops.upload_from_stream = mocker.AsyncMock(side_effect=upload_from_stream)
         return ops
 
-    async def test_sequential_writes_are_uploaded_in_order(self, ops):
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+    async def test_sequential_writes_are_streamed_in_order(self, ops):
+        handle = WriteHandle(ops, "/file.bin")
         await handle.write(0, b"hello ")
         await handle.write(6, b"world")
         await handle.close()
 
         assert ops.uploaded == {"/file.bin": b"hello world"}
 
-    async def test_out_of_order_writes_land_at_their_offset(self, ops):
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+    async def test_out_of_order_writes_are_reassembled(self, ops):
+        handle = WriteHandle(ops, "/file.bin")
         await handle.write(6, b"world")
         await handle.write(0, b"hello ")
         await handle.close()
 
         assert ops.uploaded["/file.bin"] == b"hello world"
 
-    async def test_sparse_writes_are_zero_filled(self, ops):
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
-        await handle.write(4, b"tail")
+    async def test_overlapping_writes_patch_the_buffer(self, ops):
+        handle = WriteHandle(ops, "/file.bin")
+        await handle.write(0, b"hello world")
+        await handle.write(6, b"there")
         await handle.close()
 
-        assert ops.uploaded["/file.bin"] == b"\x00\x00\x00\x00tail"
+        assert ops.uploaded["/file.bin"] == b"hello there"
 
-    async def test_payload_larger_than_the_spool_is_uploaded_intact(self, ops):
-        payload = bytes(range(256)) * 512  # 128 KiB, well past the spool limit
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+    async def test_the_size_grows_as_bytes_arrive(self, ops):
+        handle = WriteHandle(ops, "/file.bin")
+        await handle.write(0, b"hello ")
+        await handle.write(6, b"world")
+
+        assert handle.size == 11
+
+        await handle.close()
+
+    async def test_a_lone_write_not_at_zero_uploads_nothing(self, ops):
+        handle = WriteHandle(ops, "/file.bin")
+        await handle.write(4, b"tail")
+
+        with pytest.raises(ValueError, match="never filled the gap"):
+            await handle.close()
+
+        ops.uploaded == {}
+
+    async def test_a_write_behind_the_stream_is_refused(self, mocker):
+        ops = mocker.Mock(spec=Ops)
+        ops.uploaded = {}
+
+        async def upload_from_stream(stream, size, remote):
+            assert size == -1
+            ops.uploaded[remote] = b"".join([chunk async for chunk in stream])
+
+        ops.upload_from_stream = mocker.AsyncMock(side_effect=upload_from_stream)
+        handle = WriteHandle(ops, "/file.bin")
+        await handle.write(0, b"head")
+        # Let the upload take the bytes before writing again.
+        for _ in range(1000):
+            if handle._streamed == 4:
+                break
+            await asyncio.sleep(0)
+        assert handle._streamed == 4
+
+        with pytest.raises(ValueError, match="already been streamed"):
+            await handle.write(2, b"xx")
+
+        await handle.close()
+
+    async def test_a_gap_left_behind_fails_the_close(self, ops):
+        handle = WriteHandle(ops, "/file.bin")
+        await handle.write(0, b"head")
+        await handle.write(100, b"tail")
+
+        with pytest.raises(ValueError, match="never filled the gap"):
+            await handle.close()
+
+    async def test_payload_larger_than_the_buffer_is_streamed_intact(self, ops):
+        payload = bytes(range(256)) * 512  # 128 KiB in one write
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
         await handle.write(0, payload)
         await handle.close()
 
         assert ops.uploaded["/file.bin"] == payload
 
+    async def test_writes_wait_for_buffer_room(self, mocker):
+        """A write only returns once the upload has drained room for it."""
+        ops = mocker.Mock(spec=Ops)
+        go = asyncio.Event()
+        ops.uploaded = {}
+
+        async def upload_from_stream(stream, size, remote):
+            assert size == -1
+            await go.wait()
+            ops.uploaded[remote] = b"".join([chunk async for chunk in stream])
+
+        ops.upload_from_stream = mocker.AsyncMock(side_effect=upload_from_stream)
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=64)
+
+        first = asyncio.create_task(handle.write(0, b"x" * 64))
+        second = asyncio.create_task(handle.write(64, b"y" * 64))
+        # The upload has not taken a byte, so the second write must wait.
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(second), 0.05)
+
+        go.set()
+        await first
+        await second
+        await handle.close()
+
+        assert ops.uploaded["/file.bin"] == b"x" * 64 + b"y" * 64
+
     async def test_close_without_any_write_uploads_nothing(self, ops):
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+        handle = WriteHandle(ops, "/file.bin")
         await handle.close()
 
         ops.upload_from_stream.assert_not_awaited()
 
-    async def test_abort_uploads_nothing(self, ops):
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+    async def test_abort_cancels_an_in_flight_upload(self, mocker):
+        ops = mocker.Mock(spec=Ops)
+        started = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def upload_from_stream(stream, size, remote):
+            started.set()
+            await finish.wait()
+
+        ops.upload_from_stream = mocker.AsyncMock(side_effect=upload_from_stream)
+        handle = WriteHandle(ops, "/file.bin")
         await handle.write(0, b"partial")
+        await started.wait()
+
         await handle.abort()
+        finish.set()
+        await handle.close()
 
-        ops.upload_from_stream.assert_not_awaited()
-
-    async def test_close_after_abort_does_not_upload(self, ops):
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
-        await handle.write(0, b"partial")
+    async def test_close_after_abort_does_not_upload(self, mocker):
+        ops = mocker.Mock(spec=Ops)
+        handle = WriteHandle(ops, "/file.bin")
         await handle.abort()
         await handle.close()
 
         ops.upload_from_stream.assert_not_awaited()
+
+    async def test_a_failed_upload_fails_the_close(self, mocker):
+        ops = mocker.Mock(spec=Ops)
+        boom = RuntimeError("telegram is down")
+
+        async def upload_from_stream(stream, size, remote):
+            raise boom
+
+        ops.upload_from_stream = mocker.AsyncMock(side_effect=upload_from_stream)
+        handle = WriteHandle(ops, "/file.bin")
+        await handle.write(0, b"partial")
+
+        with pytest.raises(RuntimeError, match="telegram is down"):
+            await handle.close()
 
     async def test_write_after_close_is_rejected(self, ops):
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+        handle = WriteHandle(ops, "/file.bin")
         await handle.close()
 
         with pytest.raises(ValueError):
