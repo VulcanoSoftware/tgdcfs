@@ -109,7 +109,12 @@ truncated file — `exit()` aborts anything still open rather than closing
 it.
 
 `Ops.touch()` is called at open time so the name shows up in a listing
-while the upload is still running, matching the WebDAV `PUT` path.
+while the upload is still running, matching the WebDAV `PUT` path. The
+GitHub blob behind the reservation is written in the background: a slow
+or briefly offline GitHub must not hold the open -- and with it the
+client's transfer -- hostage, since FileZilla gives up after 20 s of
+silence. The deferred write retries for about ten minutes; if it never
+lands the reference leaves the tree again and the failure is logged.
 
 ## Lifecycle
 

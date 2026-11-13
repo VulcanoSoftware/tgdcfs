@@ -62,6 +62,15 @@ the fact on the commits that shipped them.
 
 ### Fixed
 
+- An SFTP upload no longer fails with "Connection timed out after 20
+  seconds of inactivity" when GitHub is slow or briefly unavailable. The
+  file reference that reserves the name at open was written to the GitHub
+  metadata repo synchronously: a GitHub hiccup (a run of 500 errors) kept
+  the open -- and with it the whole transfer -- waiting for over 20 s, and
+  FileZilla gave up. The reservation is still made right away, but the
+  blob write now runs in the background and retries for about ten minutes
+  before the reference is given up on; the upload itself only talks to
+  Telegram and Discord.
 - An upload that fails or is cut off (client timeout, reset connection) no
   longer leaves the empty file behind that the PUT creates first. FileZilla
   listed it as an existing 0 B file and asked "Target file already exists" on

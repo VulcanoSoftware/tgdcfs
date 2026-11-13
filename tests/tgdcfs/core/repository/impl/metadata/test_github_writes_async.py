@@ -113,6 +113,91 @@ class TestCreateFileRefAsync:
         )
 
 
+class TestCreateFileRefDeferred:
+    @pytest.fixture(autouse=True)
+    def _no_delay(self, monkeypatch):
+        from tgdcfs.core.repository.impl.metadata.github_repo import gh_directory
+
+        monkeypatch.setattr(gh_directory, "DEFERRED_PUT_RETRY_DELAY", 0)
+
+    @staticmethod
+    async def _wait_for_background(directory: GithubDirectory) -> None:
+        pending = [t for t in list(directory._deferred_refs) if not t.done()]
+        if pending:
+            await asyncio.gather(*pending)
+
+    async def test_the_ref_is_there_before_the_blob_is(self, ghc):
+        blob_done = threading.Event()
+
+        def create_file(**_):
+            time.sleep(0.3)
+            blob_done.set()
+
+        ghc.repo.create_file.side_effect = create_file
+        directory = GithubDirectory(ghc, "d", None)
+
+        fr = await directory.create_file_ref_deferred("f", 1)
+
+        assert fr.name == "f"
+        assert [r.name for r in directory.files] == ["f"]
+        assert not blob_done.is_set()
+
+        await self._wait_for_background(directory)
+        assert blob_done.is_set()
+        ghc.repo.create_file.assert_called_once_with(
+            path="f.1",
+            message="Create file reference for f",
+            content="",
+            branch="main",
+        )
+
+    async def test_the_caller_does_not_wait_for_github(self, ghc):
+        ghc.repo.create_file.side_effect = lambda **_: time.sleep(0.3)
+        directory = GithubDirectory(ghc, "d", None)
+
+        start = time.monotonic()
+        await directory.create_file_ref_deferred("f", 1)
+
+        assert time.monotonic() - start < 0.1
+        await self._wait_for_background(directory)
+
+    async def test_transient_failures_are_retried_in_the_background(self, ghc):
+        import requests
+
+        ghc.repo.create_file.side_effect = [
+            requests.exceptions.ConnectionError("Max retries"),
+            None,
+        ]
+        directory = GithubDirectory(ghc, "d", None)
+
+        await directory.create_file_ref_deferred("f", 1)
+        await self._wait_for_background(directory)
+
+        assert ghc.repo.create_file.call_count == 2
+        assert [r.name for r in directory.files] == ["f"]
+
+    async def test_a_permanent_failure_drops_the_ref(self, ghc):
+        from github import GithubException
+
+        ghc.repo.create_file.side_effect = GithubException(404, {}, {})
+        directory = GithubDirectory(ghc, "d", None)
+
+        await directory.create_file_ref_deferred("f", 1)
+        assert [r.name for r in directory.files] == ["f"]
+
+        await self._wait_for_background(directory)
+
+        assert len(directory.files) == 0
+
+    async def test_a_plain_directory_defers_to_the_sync_path(self):
+        a = TGFSDirectory("a", None, [], [])
+
+        fr = await a.create_file_ref_deferred("f", 1)
+
+        assert [r.name for r in a.files] == ["f"]
+        assert fr.message_id == 1
+
+
 class TestDeleteFileRefAsync:
     async def test_removes_blob_and_ref_without_blocking(self, ghc):
         ghc.repo.get_contents.return_value = Mock(sha="abc")

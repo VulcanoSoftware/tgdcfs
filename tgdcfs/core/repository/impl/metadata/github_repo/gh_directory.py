@@ -26,6 +26,12 @@ T = TypeVar("T")
 PUT_ATTEMPTS = 3
 PUT_RETRY_DELAY = 1.5
 
+# A deferred file reference write (an SFTP open does not wait for it) can
+# take much more punishment: ten rounds over roughly ten minutes before the
+# reference is given up on.
+DEFERRED_PUT_ATTEMPTS = 10
+DEFERRED_PUT_RETRY_DELAY = 5
+
 
 def _is_transient(ex: Exception) -> bool:
     status = getattr(ex, "status", None)
@@ -100,6 +106,9 @@ class GithubDirectory(TGFSDirectory):
         # there is none; whether its content has been put on the file refs.
         self.stats_sha: Optional[str] = None
         self.stats_loaded = False
+        # Background blob writes started by ``create_file_ref_deferred``;
+        # only kept here so they are not garbage collected mid-flight.
+        self._deferred_refs: set[asyncio.Task] = set()
 
     # --- dates ---------------------------------------------------------------
     #
@@ -356,6 +365,47 @@ class GithubDirectory(TGFSDirectory):
             self.files.remove(file_ref)
             raise
         return file_ref
+
+    async def create_file_ref_deferred(
+        self, name: str, file_message_id: int
+    ) -> TGFSFileRef:
+        """Create the reference now, write the blob in the background.
+
+        The in-memory part runs right away so the name shows up in a
+        listing and a following upload finds it; only the GitHub blob
+        write is deferred, so a GitHub outage cannot hold an SFTP open --
+        and with it the client's transfer -- hostage. A write that keeps
+        failing is treated like a failing ``create_file_ref_async``: the
+        reference leaves the tree and the error is logged.
+        """
+        file_ref = super().create_file_ref(name, file_message_id)
+        task = asyncio.create_task(
+            self._put_file_ref_patiently(name, file_message_id, file_ref),
+            name=f"github-file-ref-{name}",
+        )
+        self._deferred_refs.add(task)
+        task.add_done_callback(self._deferred_refs.discard)
+        return file_ref
+
+    async def _put_file_ref_patiently(
+        self, name: str, file_message_id: int, file_ref: TGFSFileRef
+    ) -> None:
+        for attempt in range(DEFERRED_PUT_ATTEMPTS):
+            try:
+                await self._ghc.write(self._put_file_ref, name, file_message_id)
+                return
+            except Exception as ex:
+                if attempt == DEFERRED_PUT_ATTEMPTS - 1 or not _is_transient(ex):
+                    logger.error(
+                        f"Failed to create file reference {name} in "
+                        f"{self._ghc.repo_name}: {ex}"
+                    )
+                    self.files.remove(file_ref)
+                    return
+                logger.warning(
+                    f"Creating file reference {name} failed ({ex}); trying again"
+                )
+                await asyncio.sleep(DEFERRED_PUT_RETRY_DELAY * (attempt + 1))
 
     def _put_file_ref(self, name: str, file_message_id: int) -> None:
         """Create the file reference blob in the repo (filename encrypted

@@ -75,7 +75,7 @@ def build_client(mocker, name: str, channel: FakeChannel) -> Client:
 
         return stream()
 
-    async def upload(directory, file_msg):
+    async def upload(directory, file_msg, version_id=None, defer_file_ref=False):
         # `touch` sends a FileMessageEmpty, which carries no readable body;
         # a live upload (SFTP) has an unknown size and is drained to EOF.
         data = bytearray()

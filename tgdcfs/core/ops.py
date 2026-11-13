@@ -134,7 +134,7 @@ class Ops:
         self._validate_path(path)
         return await self._client.file_api.set_last_modified(self.stat_file(path), when)
 
-    async def touch(self, path: str) -> None:
+    async def touch(self, path: str, defer_file_ref: bool = False) -> None:
         self._validate_path(path)
         dirname, basename = os.path.dirname(path), os.path.basename(path)
 
@@ -143,7 +143,11 @@ class Ops:
         try:
             d.find_file(basename)
         except FileOrDirectoryDoesNotExist:
-            await self._client.file_api.upload(d, FileMessageEmpty.new(name=basename))
+            await self._client.file_api.upload(
+                d,
+                FileMessageEmpty.new(name=basename),
+                defer_file_ref=defer_file_ref,
+            )
 
     async def mv_dir(self, path_from: str, path_to: str) -> TGFSDirectory:
         self._validate_path(path_from)

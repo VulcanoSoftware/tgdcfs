@@ -442,8 +442,11 @@ class TGFSSFTPServer(asyncssh.SFTPServer):
             raise asyncssh.SFTPNoSuchFile(f"{resolved.as_global()} does not exist")
 
         # Reserve the name right away so a listing during the upload shows it,
-        # exactly like the WebDAV PUT path does.
-        await ops.touch(resolved.relative)
+        # exactly like the WebDAV PUT path does. The GitHub blob behind the
+        # reservation is written in the background: a slow or briefly offline
+        # GitHub must not hold the open -- and with it the client's transfer --
+        # hostage (FileZilla gives up after 20 s of silence).
+        await ops.touch(resolved.relative, defer_file_ref=True)
 
         sftp_cfg = self._config.tgdcfs.sftp
         handle = WriteHandle(
