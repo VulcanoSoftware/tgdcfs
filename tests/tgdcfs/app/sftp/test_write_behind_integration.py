@@ -6,6 +6,7 @@ and check what a client can and cannot see in the meantime.
 """
 
 import asyncio
+from typing import Any, cast
 
 import asyncssh
 import pytest
@@ -63,7 +64,7 @@ async def server(mocker, channel, users, gate, pending, store_fails):
     client = build_client(mocker, "notes", channel)
 
     # Hold back the real uploads, but let the placeholder (``touch``) through.
-    original_upload = client.file_api.upload.side_effect
+    original_upload = cast(Any, client.file_api.upload).side_effect
 
     async def slow_upload(directory, file_msg):
         if file_msg.size:
@@ -72,7 +73,7 @@ async def server(mocker, channel, users, gate, pending, store_fails):
                 raise RuntimeError("telegram said no")
         return await original_upload(directory, file_msg)
 
-    client.file_api.upload.side_effect = slow_upload
+    cast(Any, client.file_api.upload).side_effect = slow_upload
 
     clients = {"notes": client}
     config = build_config(mocker, users)
@@ -220,14 +221,14 @@ class TestWriteBehindOff:
             side_effect=lambda u, p: _authenticate(users, u, p),
         )
         client = build_client(mocker, "notes", channel)
-        original_upload = client.file_api.upload.side_effect
+        original_upload = cast(Any, client.file_api.upload).side_effect
 
         async def slow_upload(directory, file_msg):
             if file_msg.size:
                 await gate.wait()
             return await original_upload(directory, file_msg)
 
-        client.file_api.upload.side_effect = slow_upload
+        cast(Any, client.file_api.upload).side_effect = slow_upload
         config = build_config(mocker, users)
         acceptor = await asyncssh.listen(
             host="127.0.0.1",

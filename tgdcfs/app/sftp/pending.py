@@ -21,9 +21,9 @@ import logging
 import tempfile
 import threading
 import time
-from typing import AsyncIterator, Dict, Optional, Set, Tuple
+from typing import AsyncIterator, Dict, Optional, Protocol, Set, Tuple
 
-from tgdcfs.core import Ops
+from tgdcfs.core.model import TGFSFileDesc
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,14 @@ SPOOL_READ_CHUNK = 1024 * 1024
 
 # (client name, path inside that client's tree)
 Key = Tuple[str, str]
+
+
+class StreamUploader(Protocol):
+    """What the registry needs of ``Ops``: the one call that stores a stream."""
+
+    async def upload_from_stream(
+        self, stream: AsyncIterator[bytes], size: int, remote_path: str, /
+    ) -> TGFSFileDesc: ...
 
 
 def _within(path: str, other: str) -> bool:
@@ -157,7 +165,7 @@ class PendingUploads:
 
     async def submit(
         self,
-        ops: Ops,
+        ops: StreamUploader,
         client_name: str,
         path: str,
         spool: "tempfile.SpooledTemporaryFile[bytes]",
@@ -197,7 +205,10 @@ class PendingUploads:
             self._room.notify_all()
 
     async def _run(
-        self, entry: PendingUpload, ops: Ops, previous: Optional[PendingUpload]
+        self,
+        entry: PendingUpload,
+        ops: StreamUploader,
+        previous: Optional[PendingUpload],
     ) -> None:
         _, path = entry.key
         try:
