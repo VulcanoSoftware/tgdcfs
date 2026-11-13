@@ -308,24 +308,31 @@ class TestConfig:
             SFTPConfig.from_dict({"write_behind_max_mb": -1})
 
 
-class TestStreamSegmentConfig:
+class TestStreamConfig:
     def test_streaming_is_off_by_default(self):
         cfg = SFTPConfig.from_dict({})
 
-        assert cfg.stream_segment_mb == 0
-        assert cfg.stream_segment_bytes == 0
+        assert cfg.stream_uploads is False
+        assert cfg.stream_segment_mb == 256
+        assert cfg.stream_segment_bytes == 0  # off means no segment size either
 
-    def test_reads_the_segment_size(self):
-        cfg = SFTPConfig.from_dict({"stream_segment_mb": 256})
+    def test_turning_it_on_gives_the_segment_size(self):
+        cfg = SFTPConfig.from_dict({"stream_uploads": True, "stream_segment_mb": 64})
+
+        assert cfg.stream_uploads is True
+        assert cfg.stream_segment_bytes == 64 * 1024 * 1024
+
+    def test_the_default_segment_applies_when_only_streaming_is_on(self):
+        cfg = SFTPConfig.from_dict({"stream_uploads": True})
 
         assert cfg.stream_segment_bytes == 256 * 1024 * 1024
 
-    @pytest.mark.parametrize("value", [-1, 1901, 4096])
+    @pytest.mark.parametrize("value", [0, -1, 1901, 4096])
     def test_a_segment_must_fit_one_telegram_document(self, value):
         with pytest.raises(ValueError, match="stream_segment_mb"):
             SFTPConfig.from_dict({"stream_segment_mb": value})
 
     def test_the_largest_segment_is_accepted(self):
-        assert (
-            SFTPConfig.from_dict({"stream_segment_mb": 1900}).stream_segment_mb == 1900
-        )
+        cfg = SFTPConfig.from_dict({"stream_segment_mb": 1900})
+
+        assert cfg.stream_segment_mb == 1900

@@ -189,14 +189,26 @@ class StoreFileContentRepository(IFileContentRepository):
     async def _save_unsized(
         self, file_msg: UploadableFileMessage
     ) -> List[SentFileMessage]:
-        """Store an upload of unknown length as a sequence of segments.
+        """Store an upload of unknown length.
+
+        A store that streams takes it as it is. For the others it is cut
+        into segments of known size, each uploaded once it is full.
 
         Neither staging in the cache nor tee-ing to the mirrors can start
         without the size, so those are left out here: the mirrors copy the
         finished parts from the primary, which is also what they do when
         the cache is off.
         """
-        res = await self._upload_segments(file_msg)
+        if self._store.streams_unsized_uploads:
+            # The store can take the stream as it is (Telegram: parts with
+            # an open total), so nothing needs to be cut up or spooled.
+            res = await self._store.upload(file_msg)
+            if not res:
+                raise TechnicalError(
+                    f"Nothing to store for {file_msg.name}: the stream was empty"
+                )
+        else:
+            res = await self._upload_segments(file_msg)
         if (
             self._mirror_group
             and res

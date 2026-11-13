@@ -133,6 +133,16 @@ class IStore(metaclass=ABCMeta):
         pass
 
     @property
+    def streams_unsized_uploads(self) -> bool:
+        """Whether ``upload`` takes a stream of unknown length as it is.
+
+        A store that does not (Discord needs every attachment's size before
+        the first byte) is given such a stream in segments of known size
+        instead.
+        """
+        return False
+
+    @property
     def read_slots(self) -> int:
         """Pieces of one multi-source read this store keeps in flight."""
         return 2

@@ -82,7 +82,8 @@ tgdcfs:
     # upload_buffer_dir: ''
     # write_behind: false         # answer an upload once it is buffered
     # write_behind_max_mb: 2048   # most data held back this way, 0 = no cap
-    # stream_segment_mb: 0        # upload to Telegram while the client sends, 0 = off
+    # stream_uploads: false       # upload to Telegram while the client sends
+    # stream_segment_mb: 256      # segment size for stores that cannot stream
 ```
 
 Both interfaces run in the same process and go through the same core, so
@@ -152,34 +153,34 @@ the client. WebDAV does not see a file until it is in the stores. For
 durability across restarts use `write_ack: cache` on the file system, which
 does the same for WebDAV and SFTP with the data on disk. Off by default.
 
-**Uploading while the client is still sending (`stream_segment_mb`).**
-Telegram needs a part's size before its first byte, so an upload of unknown
-length cannot be streamed as one piece. What can be done is to cut it into
-segments: with `stream_segment_mb: 256` the file is uploaded to Telegram in
-parts of 256 MB, each as soon as it is full, while the client keeps sending
-the next. When the client is done only the last, partial segment is left, so
-the second wait shrinks from the length of the transfer to at most one
-segment, and nothing is held back that the stores have not confirmed.
+**Uploading while the client is still sending (`stream_uploads`).**
+Telegram has a documented way to upload a file whose length is not known in
+advance ("Streamed uploads" in the [API documentation](https://core.telegram.org/api/files)):
+every part is sent with `file_total_parts = -1` and only the last part says how
+many there were. With `stream_uploads: true` an SFTP upload uses it. Once a few
+MB have arrived the file is uploaded to Telegram while the client keeps sending,
+and when the client is done only the end of the file is left, so the second wait
+that made an SFTP upload take twice as long is gone.
 
-* The file is stored as one Telegram message per segment (a 10 GB file with
-  256 MB segments is 40 messages). A larger segment means fewer messages but
-  a longer wait at the end; the largest allowed is 1900.
-* Files smaller than one segment are unaffected and keep the default path
-  (spool, upload on close, or `write_behind` when that is on).
+* A file stays one document, up to the 2 GB a Telegram message holds (a longer
+  file goes on in the next message, as before).
 * Data that has already been sent on cannot be rewritten: a client that goes
   back to change earlier bytes of such a large file gets an error. Ordinary
   uploads (`put`, FileZilla, WinSCP, rclone) write front to back.
+* Files of only a few MB are unaffected and keep the default path (spool,
+  upload on close, or `write_behind` when that is on).
 * Parts that were already uploaded when a transfer fails or is cut off are
   deleted again.
-* Encryption works as usual; the ciphertext is what is cut into segments.
-* The mirrors copy the finished parts from the primary store afterwards
-  (instead of in parallel); the local cache does not stage these uploads.
-* On disk the server holds the file being received, as before, plus up to two
-  segments in flight.
+* Encryption works as usual. The mirrors copy the finished parts from the
+  primary store afterwards; the local cache does not stage these uploads.
+* A store that cannot take a stream of unknown length (Discord needs every
+  attachment's size first) is given the file in segments of `stream_segment_mb`
+  (default 256, at most 1900) instead: each is uploaded as soon as it is full,
+  and the file is stored as one part per segment.
+* On disk the server holds the file being received, as before.
 
-It combines with `write_behind`: that one only applies to the (short) tail
-of a streamed file when it is off, so with streaming on the close still
-waits for the last segment. Off by default (`0`).
+With streaming on, `close` still waits for the end of the file, so `write_behind`
+has little left to do for large files. Both are off by default.
 
 **Known limits**, all of them shared with the WebDAV interface: files
 cannot be appended to or partially updated (every write stores a new

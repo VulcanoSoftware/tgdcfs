@@ -18,16 +18,18 @@ the fact on the commits that shipped them.
 
 ### Added
 
-- `tgdcfs.sftp.stream_segment_mb` (default `0` = off, at most `1900`).
-  An SFTP upload no longer has to be received in full before it goes to
-  Telegram: the file is cut into segments of this size, and each is uploaded
-  as soon as it is full while the client keeps sending. At the end only the
-  last segment is left to send, instead of the whole file. The file is
-  stored as one message per segment, files below one segment are
-  unaffected, and bytes that were already sent on cannot be rewritten.
-  Works with encryption and mirrors; failed uploads delete the parts they
-  had already stored. See "Uploading while the client is still sending" in
-  the README.
+- `tgdcfs.sftp.stream_uploads` (default `false`) and `stream_segment_mb`
+  (default `256`, at most `1900`). An SFTP upload no longer has to be
+  received in full before it goes to Telegram. Telegram documents an upload
+  of unknown length ("Streamed uploads": `file_total_parts = -1` on every
+  part but the last), and with `stream_uploads` the file is uploaded while the
+  client is still sending, as one document up to 2 GB, so only its end is
+  left to send when the client is done. Stores that need the size first
+  (Discord) get segments of `stream_segment_mb` instead. Bytes that were
+  already sent on cannot be rewritten, small files are unaffected, and
+  failed uploads delete the parts they had already stored. Works with
+  encryption and mirrors. See "Uploading while the client is still sending"
+  in the README.
 - `tgdcfs.sftp.write_behind` (default `false`) and `write_behind_max_mb`
   (default `2048`, `0` for no cap). An SFTP upload is received in full
   before it goes to Telegram, because SFTP never announces the file size,

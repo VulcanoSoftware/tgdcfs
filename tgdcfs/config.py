@@ -266,17 +266,19 @@ class SFTPConfig:
     (``0`` means no cap); a close that would exceed it is answered only
     once earlier uploads have finished.
 
-    ``stream_segment_mb`` goes further and makes the upload to Telegram
-    run *while* the client is still sending. A part must have a known size
-    before it is uploaded, so the file is cut into segments of this size:
-    a segment is uploaded as soon as it is full, and only the last,
-    partial one waits for the end of the file. A file is therefore stored
-    as one Telegram message per segment (a 10 GB file with 256 MB segments
-    is 40 parts) and a larger segment means fewer parts but a longer wait
-    at the end. Files smaller than one segment are unaffected. Data that
-    has already been sent on cannot be rewritten, so a client that goes
-    back to change earlier bytes (some ``sshfs`` workloads) gets an error
-    on such a large file. ``0`` (the default) turns it off.
+    ``stream_uploads`` goes further and makes the upload run *while* the
+    client is still sending. Telegram has a documented way to upload a file
+    whose length is not known yet ("streamed uploads": every part says
+    ``file_total_parts = -1`` except the last), which is used for Telegram
+    stores, so the file stays one document up to the 2 GB a message can
+    hold and only the last part is left to send when the client is done.
+    Stores that need a part's size first (Discord) get the file in segments
+    of ``stream_segment_mb`` instead: a segment is uploaded as soon as it
+    is full, and a larger segment means fewer parts but a longer wait at the
+    end. Small files (a few MB) are unaffected. Data that has already been
+    sent on cannot be rewritten, so a client that goes back to change
+    earlier bytes (some ``sshfs`` workloads) gets an error on such a large
+    file. Off by default.
     """
 
     enabled: bool
@@ -288,10 +290,12 @@ class SFTPConfig:
     upload_buffer_dir: Optional[str]
     write_behind: bool = False
     write_behind_max_mb: int = 2048
-    stream_segment_mb: int = 0
+    stream_uploads: bool = False
+    stream_segment_mb: int = 256
 
-    # Telegram takes a document of up to just under 2 GB.
+    # A segment is one document, and a document is below 2 GB.
     MAX_STREAM_SEGMENT_MB = 1900
+    DEFAULT_STREAM_SEGMENT_MB = 256
     DEFAULT_PORT = 2222
     DEFAULT_WRITE_BEHIND_MAX_MB = 2048
     DEFAULT_HOST_KEY_FILE = "sftp_host_key"
@@ -307,6 +311,9 @@ class SFTPConfig:
 
     @property
     def stream_segment_bytes(self) -> int:
+        """Segment size for stores that cannot stream; ``0`` when streaming is off."""
+        if not self.stream_uploads:
+            return 0
         return self.stream_segment_mb * 1024 * 1024
 
     @classmethod
@@ -334,10 +341,12 @@ class SFTPConfig:
                 f"got {write_behind_max_mb}"
             )
 
-        stream_segment_mb = int(data.get("stream_segment_mb", 0))
-        if not 0 <= stream_segment_mb <= cls.MAX_STREAM_SEGMENT_MB:
+        stream_segment_mb = int(
+            data.get("stream_segment_mb", cls.DEFAULT_STREAM_SEGMENT_MB)
+        )
+        if not 1 <= stream_segment_mb <= cls.MAX_STREAM_SEGMENT_MB:
             raise ValueError(
-                f"sftp.stream_segment_mb must be between 0 and "
+                f"sftp.stream_segment_mb must be between 1 and "
                 f"{cls.MAX_STREAM_SEGMENT_MB}, got {stream_segment_mb}"
             )
 
@@ -361,6 +370,7 @@ class SFTPConfig:
             ),
             write_behind=bool(data.get("write_behind", False)),
             write_behind_max_mb=write_behind_max_mb,
+            stream_uploads=bool(data.get("stream_uploads", False)),
             stream_segment_mb=stream_segment_mb,
         )
 

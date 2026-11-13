@@ -24,6 +24,11 @@ SEEK_FORWARD_THRESHOLD = 1024 * 1024
 # How much of the spooled upload we hand to the uploader at a time.
 SPOOL_READ_CHUNK = 1024 * 1024
 
+# How much of a file has to have arrived before it is worth uploading while it
+# is still being received. Below it the file is uploaded on close like any
+# other, with the whole size known.
+STREAM_START_BYTES = 8 * 1024 * 1024
+
 
 class Handle:
     """Shared behaviour of the objects handed back to the SFTP layer."""
@@ -169,8 +174,8 @@ class SpoolReadHandle(Handle):
 class WriteHandle(Handle):
     """Receives an SFTP upload and gets it into the stores.
 
-    Telegram needs the size of a file before its first byte and SFTP never
-    announces it, so the payload is spooled -- in memory up to
+    The normal Telegram upload needs the size of a file before its first
+    byte and SFTP never announces it, so the payload is spooled -- in memory up to
     ``spool_max_bytes``, on disk beyond that. Buffering also makes
     out-of-order and sparse writes work, since the spool can be seeked.
 
@@ -181,13 +186,14 @@ class WriteHandle(Handle):
       as the transfer itself.
     * With a ``pending`` registry (``sftp.write_behind``) the finished spool
       is handed over to it and the CLOSE is answered right away.
-    * With ``stream_segment_bytes`` (``sftp.stream_segment_mb``) the upload
-      to the stores starts as soon as the first segment of that size has
-      arrived and keeps pace with the client, so at CLOSE only the last,
-      partial segment is left. The file is stored as one part per segment.
+    * With ``stream_segment_bytes`` (``sftp.stream_uploads``) the upload
+      to the stores starts as soon as a few MB have arrived and keeps pace
+      with the client, so at CLOSE only the end of the file is left. A
+      store that can take a stream of unknown length (Telegram) gets it as
+      it is; one that cannot gets segments of ``stream_segment_bytes``.
       The price is that data already sent on can no longer be rewritten:
-      a write into it fails. Files smaller than one segment are not
-      affected and go the default way.
+      a write into it fails. Files that stay below the start threshold are
+      not affected and go the default way.
     """
 
     def __init__(
@@ -218,6 +224,9 @@ class WriteHandle(Handle):
         # beyond it, ``_yielded`` how much of the prefix went to the stores
         # (and so must not change any more).
         self._segment_bytes = stream_segment_bytes
+        # Streaming has a cost (every part goes out as it comes, and bytes
+        # sent on cannot change), so a small file is left to the plain path.
+        self._start_bytes = min(stream_segment_bytes, STREAM_START_BYTES)
         self._io = threading.Lock()
         self._claim = asyncio.Lock()
         self._cond = asyncio.Condition()
@@ -246,7 +255,7 @@ class WriteHandle(Handle):
                     raise ValueError(
                         f"cannot rewrite the first {self._yielded} bytes of "
                         f"{self._path}: they are already on their way to the "
-                        "stores (sftp.stream_segment_mb)"
+                        "stores (sftp.stream_uploads)"
                     )
                 await asyncio.to_thread(self._write_sync, offset, data)
             if self._segment_bytes:
@@ -317,7 +326,7 @@ class WriteHandle(Handle):
                     self._islands.sort()
                 while self._islands and self._islands[0][0] <= self._hwm:
                     self._hwm = max(self._hwm, self._islands.pop(0)[1])
-            if self._stream is None and self._hwm >= self._segment_bytes:
+            if self._stream is None and self._hwm >= self._start_bytes:
                 self._stream = asyncio.create_task(
                     self._ops.upload_from_unsized_stream(
                         self._growing(),

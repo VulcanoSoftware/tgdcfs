@@ -22,12 +22,22 @@ MB = 1024 * 1024
 PAYLOAD = bytes((i * 31 + 7) % 251 for i in range(3 * MB + MB // 2))  # 3.5 MB
 
 
-@pytest.fixture
-async def stack() -> Stack:
+@pytest.fixture(params=["streaming_store", "segmenting_store"])
+async def stack(request) -> Stack:
+    # A store that streams (Telegram) keeps the file in one document; one
+    # that does not (Discord) is given segments of ``stream_segment_mb``.
+    streams = request.param == "streaming_store"
     return await Stack(
-        FakeStore(key="tg:1", backend_name="telegram"),
+        FakeStore(key="tg:1", backend_name="telegram", streams=streams),
         FakeStore(key="tg:2", backend_name="telegram"),
     ).init()
+
+
+def expected_parts(stack: Stack, size: int) -> list[int]:
+    if stack.primary.streams:
+        return [size]
+    whole, rest = divmod(size, MB)
+    return [MB] * whole + ([rest] if rest else [])
 
 
 @pytest.fixture
@@ -55,7 +65,7 @@ async def server(mocker, stack, users):
     config = mocker.Mock()
     config.tgdcfs.users = users
     config.tgdcfs.sftp = SFTPConfig.from_dict(
-        {"upload_buffer_size_mb": 0, "stream_segment_mb": 1}
+        {"upload_buffer_size_mb": 0, "stream_uploads": True, "stream_segment_mb": 1}
     )
     acceptor = await asyncssh.listen(
         host="127.0.0.1",
@@ -92,7 +102,9 @@ async def test_a_large_upload_arrives_intact_in_segments(server, stack, tmp_path
         assert (await sftp.stat("/notes/big.bin")).size == len(PAYLOAD)
 
     assert back.read_bytes() == PAYLOAD
-    assert [len(p) for p in stored_parts(stack, "big.bin")] == [MB, MB, MB, MB // 2]
+    assert [len(p) for p in stored_parts(stack, "big.bin")] == expected_parts(
+        stack, len(PAYLOAD)
+    )
     assert await stack.read("big.bin") == PAYLOAD
 
 
@@ -101,13 +113,21 @@ async def test_the_stores_receive_segments_before_the_client_is_done(server, sta
         async with sftp.open("/notes/live.bin", "wb") as remote:
             await remote.write(PAYLOAD[: 2 * MB + MB // 4])
 
-            async def first_segment_stored() -> None:
-                while not stored_parts(stack, "live.bin"):
+            async def store_has_it() -> None:
+                # A segmenting store has a message per finished segment; a
+                # streaming one only makes the message when the document is
+                # complete, but takes the bytes as they come.
+                while not (
+                    stack.primary.streamed >= MB
+                    if stack.primary.streams
+                    else stored_parts(stack, "live.bin")
+                ):
                     await asyncio.sleep(0.01)
 
-            # The client has not closed the file, yet a segment is stored.
-            await asyncio.wait_for(first_segment_stored(), timeout=10)
-            assert stored_parts(stack, "live.bin")[0] == PAYLOAD[:MB]
+            # The client has not closed the file, yet the store has bytes.
+            await asyncio.wait_for(store_has_it(), timeout=10)
+            if not stack.primary.streams:
+                assert stored_parts(stack, "live.bin")[0] == PAYLOAD[:MB]
 
             await remote.write(PAYLOAD[2 * MB + MB // 4 :], 2 * MB + MB // 4)
 

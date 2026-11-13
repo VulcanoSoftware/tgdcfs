@@ -113,12 +113,10 @@ get the first byte after the client has sent the last one, and the client
 waits for the answer to that CLOSE the whole time. The wait grows with the
 file, and a client with an inactivity timeout gives up and re-uploads.
 
-The size cannot be recovered earlier. Clients do not announce it (OpenSSH
-strips the size from the attributes of OPEN on purpose), and cutting the
-stream into parts of a fixed size to upload those while receiving would
-change the stored layout of every SFTP upload for the benefit of files above
-the part size only (the part size is 2 GB). What can be changed is who
-waits: `sftp.write_behind` answers the CLOSE once the spool is complete.
+Clients do not announce the size either (OpenSSH strips it from the
+attributes of OPEN on purpose). There are two ways out, below: upload while
+receiving with Telegram's streamed upload (`sftp.stream_uploads`), or change
+who waits: `sftp.write_behind` answers the CLOSE once the spool is complete.
 
 `PendingUploads` (`pending.py`) takes the finished spool and uploads it in a
 background task. Until that is done it is the registry the SFTP layer asks
@@ -139,42 +137,55 @@ first:
   is pending, so the cap cannot deadlock;
 * `main()` drains the registry after the listener is closed.
 
-#### Streaming without a known size: segments
+#### Streaming without a known size
 
-`write_behind` only moves the wait. Whether the size is really needed first
-depends on what a part is: Telegram's `saveBigFilePart` carries
-`file_total_parts`, so every *document* needs its size before its first
-byte -- but the unit is ours to choose. A version is already stored as a
-list of parts with their sizes, and every read maps a byte range onto that
-list, so the parts need not be 2 GB each. `sftp.stream_segment_mb` makes an
-unsized upload a sequence of segments:
+`write_behind` only moves the wait. The wait can be removed because Telegram
+does allow an upload of unknown length. https://core.telegram.org/api/files
+("Streamed uploads") describes it: `upload.saveBigFilePart` is used for every
+part (even if the stream ends up under 10 MB), `file_total_parts` is `-1` on
+every part but the last, the last part carries `ceil(total / part_size)`, and
+`inputFileBig` is finished with that count. The size of the file is only
+needed for the normal flow, where the total is announced with every part; it
+never was a limit of the API, only of `FileUploader`, which used to compute
+`total_parts` from the size first.
 
-* `WriteHandle` tracks the prefix written without holes (`_hwm`). When it
-  reaches one segment it starts `Ops.upload_from_unsized_stream` over a
-  stream that grows with the spool (`_growing`), and keeps feeding it as the
-  client writes. Bytes handed to the stream are spoken for: a later write
+`sftp.stream_uploads` uses it:
+
+* `WriteHandle` tracks the prefix written without holes (`_hwm`). Once a few
+  MB have arrived (`STREAM_START_BYTES`) it starts `Ops.upload_from_unsized_stream`
+  over a stream that grows with the spool (`_growing`) and keeps feeding it as
+  the client writes. Bytes handed to the stream are spoken for: a later write
   below `_yielded` is refused, anything beyond may still be rewritten, and a
   hole at the end reads as zeros.
 * `FileMessageFromStream(size=None)` is an *unsized* message: `get_size`
-  raises, `read` is short only at the end of the stream, and the task shows
-  no total.
-* `StoreFileContentRepository._upload_segments` fills a spool of
-  `segment_size` bytes, hands it to the store as an ordinary upload of known
-  size (`FileMessageFromSpool`, numbered from `part_offset` so the parts
-  keep counting), and fills the next one while that is on its way. A
-  segment smaller than the size ends the stream. On any failure the parts
-  already sent are deleted again, forced, because they never belonged to a
-  file.
-* Encryption wraps the unsized message and encrypts until the plaintext
-  ends; the repository cuts the *ciphertext* into segments, which is what
-  it already does at the 2 GB part boundary. Staging in the cache and
-  tee-ing to mirrors need the size and are skipped; the mirrors copy the
-  finished parts afterwards.
+  raises, `read` is short only at the end of the stream, and the task shows no
+  total.
+* `FileUploader` streams it (`_upload_stream`): parts of one part size go out
+  with `-1`, up to the worker count in parallel, while the stream is read at the
+  pace of the upload. One part is read ahead, so the last part is known to be
+  the last and no empty part is needed; it is sent only after every earlier
+  part is confirmed, with the real count. A document holds at most `max_bytes`
+  (2 GB); the rest of the stream is left unread for the next document.
+* `TelegramStore._upload_unsized` loops over documents, numbering them from
+  `part_offset`, and sends each as soon as it is complete. On any failure the
+  messages already sent are deleted again, forced, because they never belonged
+  to a file.
+* `IStore.streams_unsized_uploads` says whether a store takes such a stream.
+  Telegram does; one that does not (Discord needs every attachment's size
+  first) gets segments of `sftp.stream_segment_mb`:
+  `StoreFileContentRepository._upload_segments` fills a spool per segment, uploads
+  it as a normal part of known size (`FileMessageFromSpool`) and fills the next
+  while that is on its way.
+* Encryption wraps the unsized message and encrypts until the plaintext ends;
+  the ciphertext is what gets cut into documents or segments. Staging in the
+  cache and tee-ing to mirrors need the size and are skipped; the mirrors copy
+  the finished parts afterwards.
 
-Trade-offs: more messages per large file, no rewriting of sent bytes, and
-the wait at the end is the last segment rather than nothing. Files below one
-segment keep the old path. The part count is bounded by what a version can
-hold, not by Telegram.
+Trade-offs: bytes already sent on cannot be rewritten, the document appears in
+the channel only when it is complete, and a stream stays on the big-file calls
+and so skips the cheaper small-file path (hence the start threshold). This has
+been tested against the API as documented and against fakes, not against the
+real Telegram servers.
 
 The cost of `write_behind` is the point where the client is told "done": the data is only in a
 spool, in memory or a temp file, not in a store. A crash loses it; a failure

@@ -135,6 +135,63 @@ class TestRoundTrip:
         assert await stack.read("a.bin") == newer
 
 
+class TestStoreThatStreams:
+    """A store that takes the stream as it is (Telegram): no segments."""
+
+    @pytest.fixture
+    async def streaming(self) -> Stack:
+        return await Stack(
+            FakeStore(key="tg:1", backend_name="telegram", streams=True),
+            FakeStore(key="tg:2", backend_name="telegram", streams=True),
+        ).init()
+
+    @pytest.mark.parametrize("size", [1, 999, 3500, 12_345])
+    async def test_the_file_stays_one_document(self, streaming: Stack, size: int):
+        data = payload(size)
+
+        await put_unsized(streaming, "a.bin", pieces(data))
+
+        assert await streaming.read("a.bin") == data
+        assert await part_sizes(streaming, "a.bin") == [size]
+
+    async def test_ranges_read_back(self, streaming: Stack):
+        data = payload(3500)
+        await put_unsized(streaming, "a.bin", pieces(data))
+
+        for begin, end in [(0, 0), (1000, 2000), (3499, 3499)]:
+            assert await streaming.read("a.bin", begin, end) == data[begin : end + 1]
+
+    async def test_a_document_limit_continues_in_the_next_message(self):
+        stack = await Stack(
+            FakeStore(
+                key="tg:1", backend_name="telegram", streams=True, max_part_bytes=2500
+            ),
+            FakeStore(key="tg:2", backend_name="telegram", streams=True),
+        ).init()
+        data = payload(6000)
+
+        await put_unsized(stack, "a.bin", pieces(data))
+
+        assert await part_sizes(stack, "a.bin") == [2500, 2500, 1000]
+        assert await stack.read("a.bin", 2400, 5100) == data[2400:5101]
+
+    async def test_the_segment_size_plays_no_role(self, streaming: Stack):
+        await put_unsized(streaming, "a.bin", pieces(payload(3500)), segment=10)
+
+        assert await part_sizes(streaming, "a.bin") == [3500]
+
+    async def test_an_empty_stream_stores_nothing(self, streaming: Stack):
+        with pytest.raises(TechnicalError, match="empty"):
+            await put_unsized(streaming, "a.bin", pieces(b""))
+
+    async def test_the_mirror_gets_the_parts_too(self, streaming: Stack):
+        await put_unsized(streaming, "a.bin", pieces(payload(3500)))
+
+        fd = await streaming.fd_repo.get(streaming.root.find_file("a.bin"))
+        version = fd.get_latest_version()
+        assert len(version.mirrors[streaming.mirror.key]) == len(version.message_ids)
+
+
 class TestFailure:
     async def test_an_empty_stream_stores_nothing(self, stack: Stack):
         before = len(documents(stack.primary))
