@@ -4,7 +4,6 @@ from __future__ import annotations
 import base64
 import gzip
 from pathlib import Path
-from typing import Any
 
 # Public API declared for static type checkers (mypy). Values are
 # overwritten at import time by the embedded module payload below.
@@ -13,7 +12,7 @@ KEY_PREFIX: str
 PART_SIZE_DEFAULT: int
 PART_SIZE_PREMIUM: int
 MAX_TEXT_CHARS: int
-TelegramStore: Any
+TelegramStore: type
 
 _dir = Path(__file__).parent
 _parts = [
@@ -34,8 +33,8 @@ _ns: dict = {
     "__package__": __package__,
     "__builtins__": __builtins__,
 }
-exec(compile(_src, _file, "exec"), _ns)
+exec(compile(_src, _file, "exec"), _ns)  # noqa: S102
 for _k, _v in _ns.items():
     if not _k.startswith("_"):
         globals()[_k] = _v
-del _dir, _parts, _b64, _src, _ns, _file, _k, _v, base64, gzip, Path, Any
+del _dir, _parts, _b64, _src, _ns, _file, _k, _v, base64, gzip, Path
