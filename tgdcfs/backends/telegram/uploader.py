@@ -62,17 +62,23 @@ class FileUploader:
         # 128 KiB below 100 MB, which quadruples the number of requests for
         # no gain -- 512 KiB is accepted for any size.
         self._chunk_size = get_config().tgdcfs.transfer.upload_part_size_bytes
-        self._total_parts = (self._file_size + self._chunk_size - 1) // self._chunk_size
+        self._total_parts = (
+            (self._file_size + self._chunk_size - 1) // self._chunk_size
+            if self._file_size >= 0
+            else 0
+        )
 
         self._part_indexes: asyncio.Queue[int] = asyncio.Queue(
-            maxsize=self._total_parts
+            maxsize=max(1, self._total_parts)
         )
 
         self._workers = workers or WorkersConfig.from_config()
 
         self._file_id = generate_random_long()
 
-        self._is_big = is_big_file(self._file_size)
+        # Unknown-length streams must use Telegram's big-file protocol, even
+        # when the eventual payload turns out to be small.
+        self._is_big = self._file_size < 0 or is_big_file(self._file_size)
         self._read_size = 0
         self._uploaded_size = 0
 
@@ -85,7 +91,9 @@ class FileUploader:
     async def _read(self, length: int) -> bytes:
         return await self._file_msg.read(length)
 
-    async def _upload_chunk(self, chunk: FileChunk) -> None:
+    async def _upload_chunk(
+        self, chunk: FileChunk, file_total_parts: Optional[int] = None
+    ) -> None:
         for attempt in range(1, MAX_PART_ATTEMPTS + 1):
             try:
                 if self._is_big:
@@ -94,7 +102,11 @@ class FileUploader:
                             file_id=self._file_id,
                             bytes=chunk.content,
                             file_part=chunk.file_part,
-                            file_total_parts=self._total_parts,
+                            file_total_parts=(
+                                self._total_parts
+                                if file_total_parts is None
+                                else file_total_parts
+                            ),
                         )
                     )
                 else:
@@ -151,8 +163,63 @@ class FileUploader:
             return await tt.cancelled()
         return False
 
+    async def _upload_unknown_size(self) -> int:
+        """Upload a one-shot stream using Telegram's unknown-length protocol.
+
+        Keep one part in hand so only the final part carries the definitive
+        part count. Intermediate parts use file_total_parts=-1. If the
+        stream is empty, an empty final part is still required.
+        """
+        total_size = 0
+        part = 0
+        try:
+            pending = await self._read(self._chunk_size)
+            if not pending:
+                await self._upload_chunk(FileChunk(b'', 0), file_total_parts=1)
+                part = 1
+            else:
+                while True:
+                    if await self._cancelled():
+                        raise TechnicalError("Upload was cancelled")
+                    following = await self._read(self._chunk_size)
+                    if following:
+                        await self._upload_chunk(
+                            FileChunk(content=pending, file_part=part),
+                            file_total_parts=-1,
+                        )
+                        total_size += len(pending)
+                        part += 1
+                        if self._file_msg.task_tracker:
+                            await self._file_msg.task_tracker.update_progress(
+                                size_delta=len(pending)
+                            )
+                        pending = following
+                        continue
+
+                    # EOF: this is the final part, so Telegram now learns
+                    # the actual number of parts in the file.
+                    await self._upload_chunk(
+                        FileChunk(content=pending, file_part=part),
+                        file_total_parts=part + 1,
+                    )
+                    total_size += len(pending)
+                    part += 1
+                    if self._file_msg.task_tracker:
+                        await self._file_msg.task_tracker.update_progress(
+                            size_delta=len(pending)
+                        )
+                    break
+
+            self._file_size = total_size
+            self._total_parts = part
+            return total_size
+        finally:
+            await self._close()
+
     async def upload(self) -> int:
         await self._file_msg.open()
+        if self._file_size < 0:
+            return await self._upload_unknown_size()
 
         for i in range(self._total_parts):
             await self._part_indexes.put(i)

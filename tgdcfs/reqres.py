@@ -305,6 +305,7 @@ class FileMessageFromBuffer(UploadableFileMessage):
 class FileMessageFromStream(UploadableFileMessage):
     stream: FileContent
     buffer: bytearray = field(default_factory=bytearray)
+    _eof: bool = False
 
     @classmethod
     def new(
@@ -325,20 +326,33 @@ class FileMessageFromStream(UploadableFileMessage):
         )
 
     async def read(self, length: int) -> bytes:
-        """Take ``length`` bytes off the front of the stream.
-
-        Kept in one buffer rather than a list of chunks: rejoining the list
-        on every read copies everything still pending, which for a stream
-        arriving in small chunks is quadratic in the size of the part.
-        """
-        size_to_return = min(length, self.get_size() - self._read_size)
-        while len(self.buffer) < size_to_return:
-            self.buffer.extend(await anext(self.stream))
-
-        res = bytes(self.buffer[:size_to_return])
+        """Read up to length bytes, also supporting streams with unknown size (-1)."""
+        if length <= 0:
+            return b''
+        known_size = self.get_size()
+        target = length if known_size < 0 else min(
+            length, known_size - self._read_size
+        )
+        while len(self.buffer) < target and not self._eof:
+            try:
+                chunk = await anext(self.stream)
+            except StopAsyncIteration:
+                self._eof = True
+                break
+            if chunk:
+                self.buffer.extend(chunk)
+        if self._eof and known_size < 0:
+            # Include bytes still buffered: they have been read from the
+            # producer but have not yet been returned to the uploader.
+            self.size = self._read_size + len(self.buffer)
+        size_to_return = min(target, len(self.buffer))
+        result = bytes(self.buffer[:size_to_return])
         del self.buffer[:size_to_return]
         self._read_size += size_to_return
-        return res
+        return result
+
+    async def close(self) -> None:
+        await aclose_content(self.stream)
 
 
 @dataclass

@@ -127,7 +127,7 @@ class TestWriteHandle:
 
         async def upload_from_stream(stream, size, remote):
             data = b"".join([chunk async for chunk in stream])
-            assert len(data) == size
+            assert size == -1
             ops.uploaded[remote] = data
 
         ops.upload_from_stream = mocker.AsyncMock(side_effect=upload_from_stream)
@@ -141,7 +141,7 @@ class TestWriteHandle:
 
         assert ops.uploaded == {"/file.bin": b"hello world"}
 
-    async def test_out_of_order_writes_land_at_their_offset(self, ops):
+    async def test_out_of_order_writes_are_reassembled(self, ops):
         handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
         await handle.write(6, b"world")
         await handle.write(0, b"hello ")
@@ -149,7 +149,7 @@ class TestWriteHandle:
 
         assert ops.uploaded["/file.bin"] == b"hello world"
 
-    async def test_sparse_writes_are_zero_filled(self, ops):
+    async def test_sparse_writes_are_zero_filled_on_close(self, ops):
         handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
         await handle.write(4, b"tail")
         await handle.close()
@@ -175,7 +175,8 @@ class TestWriteHandle:
         await handle.write(0, b"partial")
         await handle.abort()
 
-        ops.upload_from_stream.assert_not_awaited()
+        ops.upload_from_stream.assert_awaited_once()
+        assert ops.uploaded == {}
 
     async def test_close_after_abort_does_not_upload(self, ops):
         handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
@@ -183,7 +184,7 @@ class TestWriteHandle:
         await handle.abort()
         await handle.close()
 
-        ops.upload_from_stream.assert_not_awaited()
+        ops.upload_from_stream.assert_awaited_once()
 
     async def test_write_after_close_is_rejected(self, ops):
         handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)

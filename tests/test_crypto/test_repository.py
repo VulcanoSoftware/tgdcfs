@@ -26,6 +26,7 @@ from tgdcfs.crypto.repository import EncryptingFileContentRepository
 from tgdcfs.reqres import (
     FileContent,
     FileMessageFromBuffer,
+    FileMessageFromStream,
     SentFileMessage,
     UploadableFileMessage,
 )
@@ -76,9 +77,9 @@ class _InMemoryRepo(IFileContentRepository):
                     if not piece:
                         break
                     buf += piece
-                    if len(buf) >= file_msg.get_size():
+                    if file_msg.get_size() >= 0 and len(buf) >= file_msg.get_size():
                         break
-                if len(buf) >= file_msg.get_size():
+                if file_msg.get_size() >= 0 and len(buf) >= file_msg.get_size():
                     break
         finally:
             await file_msg.close()
@@ -177,6 +178,29 @@ async def test_full_round_trip(size: int) -> None:
 
     out = await _collect(await repo.get(fv, 0, -1, "test.bin"))
     assert out == plaintext
+
+
+async def test_unknown_length_stream_round_trip() -> None:
+    repo = _make_repo(chunk_size=4096)
+    plaintext = os.urandom(4096 * 3 + 137)
+
+    async def source():
+        # Deliberately yield irregular pieces, including short reads.
+        for start in range(0, len(plaintext), 733):
+            yield plaintext[start : start + 733]
+
+    file_msg = FileMessageFromStream.new(source(), size=-1, name="stream.bin")
+    sent = await repo.save(file_msg)
+    fv = _FakeFileVersion(
+        id="v-stream",
+        size=sum(message.size for message in sent),
+        message_ids=[message.message_id for message in sent],
+        part_sizes=[message.size for message in sent],
+    )
+
+    assert file_msg.get_size() == len(plaintext)
+    assert fv.size == HEADER_SIZE + len(plaintext) + 4 * CHUNK_OVERHEAD
+    assert await _collect(await repo.get(fv, 0, -1, "stream.bin")) == plaintext
 
 
 async def test_ciphertext_size_matches_formula() -> None:

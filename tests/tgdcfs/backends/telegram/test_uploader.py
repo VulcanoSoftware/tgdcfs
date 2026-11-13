@@ -274,6 +274,9 @@ class TestUploaderFromStream:
         client.save_file_part = mocker.AsyncMock(
             return_value=SaveFilePartResp(success=True)
         )
+        client.save_big_file_part = mocker.AsyncMock(
+            return_value=SaveFilePartResp(success=True)
+        )
         return client
 
     @staticmethod
@@ -281,6 +284,57 @@ class TestUploaderFromStream:
         """Create a test async stream from chunks"""
         for chunk in chunks:
             yield chunk
+
+    @pytest.mark.asyncio
+    async def test_unknown_size_stream_uses_big_file_protocol(self, mock_client):
+        payload = b"unknown length"
+        file_msg = FileMessageFromStream.new(
+            stream=self.create_test_stream([payload]),
+            size=-1,
+            name="unknown.bin",
+        )
+        uploader = FileUploader(client=mock_client, file_msg=file_msg)
+
+        assert await uploader.upload() == len(payload)
+
+        request = mock_client.save_big_file_part.await_args.args[0]
+        assert request.bytes == payload
+        assert request.file_part == 0
+        assert request.file_total_parts == 1
+        assert uploader.get_uploaded_file().parts == 1
+        mock_client.save_file_part.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unknown_size_stream_marks_only_final_part(self, mock_client):
+        payload = b"abcdefghij"
+        file_msg = FileMessageFromStream.new(
+            stream=self.create_test_stream([payload[:3], payload[3:7], payload[7:]]),
+            size=-1,
+            name="multi-part.bin",
+        )
+        uploader = FileUploader(client=mock_client, file_msg=file_msg)
+        uploader._chunk_size = 4
+
+        assert await uploader.upload() == len(payload)
+
+        requests = [call.args[0] for call in mock_client.save_big_file_part.await_args_list]
+        assert [request.bytes for request in requests] == [b"abcd", b"efgh", b"ij"]
+        assert [request.file_total_parts for request in requests] == [-1, -1, 3]
+        assert uploader.get_uploaded_file().parts == 3
+
+    @pytest.mark.asyncio
+    async def test_unknown_size_empty_stream_uploads_empty_final_part(self, mock_client):
+        file_msg = FileMessageFromStream.new(
+            stream=self.create_test_stream([]), size=-1, name="empty.bin"
+        )
+        uploader = FileUploader(client=mock_client, file_msg=file_msg)
+
+        assert await uploader.upload() == 0
+
+        request = mock_client.save_big_file_part.await_args.args[0]
+        assert request.bytes == b""
+        assert request.file_total_parts == 1
+        assert uploader.get_uploaded_file().parts == 1
 
     @pytest.mark.asyncio
     async def test_stream_upload(self, mock_client):
