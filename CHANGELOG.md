@@ -18,7 +18,12 @@ the fact on the commits that shipped them.
 
 ### Added
 
-- `tgdcfs.sftp.stream_uploads` (default `false`) and `stream_segment_mb`
+- While an SFTP upload streams, bytes already sent to the stores are handed
+  back to the disk (hole punching) and the client's writes wait once it is
+  more than 128 MiB ahead of the upload. Before, the whole file stayed in the
+  scratch space, which filled up on large files (`No space left on device`).
+
+- `tgdcfs.sftp.stream_uploads` (default `true`) and `stream_segment_mb`
   (default `256`, at most `1900`). An SFTP upload no longer has to be
   received in full before it goes to Telegram. Telegram documents an upload
   of unknown length ("Streamed uploads": `file_total_parts = -1` on every

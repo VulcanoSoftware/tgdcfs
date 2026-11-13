@@ -278,7 +278,8 @@ class SFTPConfig:
     end. Small files (a few MB) are unaffected. Data that has already been
     sent on cannot be rewritten, so a client that goes back to change
     earlier bytes (some ``sshfs`` workloads) gets an error on such a large
-    file. Off by default.
+    file. On by default; ``stream_uploads: false`` brings back the plain
+    spool-then-upload behaviour.
     """
 
     enabled: bool
@@ -290,7 +291,7 @@ class SFTPConfig:
     upload_buffer_dir: Optional[str]
     write_behind: bool = False
     write_behind_max_mb: int = 2048
-    stream_uploads: bool = False
+    stream_uploads: bool = True
     stream_segment_mb: int = 256
 
     # A segment is one document, and a document is below 2 GB.
@@ -370,7 +371,7 @@ class SFTPConfig:
             ),
             write_behind=bool(data.get("write_behind", False)),
             write_behind_max_mb=write_behind_max_mb,
-            stream_uploads=bool(data.get("stream_uploads", False)),
+            stream_uploads=bool(data.get("stream_uploads", True)),
             stream_segment_mb=stream_segment_mb,
         )
 

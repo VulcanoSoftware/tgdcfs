@@ -309,11 +309,17 @@ class TestConfig:
 
 
 class TestStreamConfig:
-    def test_streaming_is_off_by_default(self):
+    def test_streaming_is_on_by_default(self):
         cfg = SFTPConfig.from_dict({})
 
-        assert cfg.stream_uploads is False
+        assert cfg.stream_uploads is True
         assert cfg.stream_segment_mb == 256
+        assert cfg.stream_segment_bytes == 256 * 1024 * 1024
+
+    def test_it_can_be_turned_off(self):
+        cfg = SFTPConfig.from_dict({"stream_uploads": False})
+
+        assert cfg.stream_uploads is False
         assert cfg.stream_segment_bytes == 0  # off means no segment size either
 
     def test_turning_it_on_gives_the_segment_size(self):

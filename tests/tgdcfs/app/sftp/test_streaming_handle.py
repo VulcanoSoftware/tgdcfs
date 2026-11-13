@@ -267,3 +267,90 @@ class TestOff:
 
         assert ops.sized_uploads == 1
         assert not ops.started.is_set()
+
+
+class SlowOps(StreamingOps):
+    """Takes the stream only once the test lets it."""
+
+    def __init__(self):
+        super().__init__()
+        self.gate = asyncio.Event()
+
+    async def upload_from_unsized_stream(self, stream, path, segment, spool_dir):
+        await self.gate.wait()
+        await super().upload_from_unsized_stream(stream, path, segment, spool_dir)
+
+
+class TestKeepsTheDiskClear:
+    async def test_a_client_that_outruns_the_upload_is_held_back(self, monkeypatch):
+        monkeypatch.setattr("tgdcfs.app.sftp.handles.STREAM_WINDOW_BYTES", 1000)
+        ops = SlowOps()
+        h = handle(ops)
+        await h.write(0, data(SEGMENT))  # starts the stream, which is stuck
+
+        far_ahead = asyncio.create_task(h.write(5000, data(1000, 5000)))
+        await asyncio.sleep(0.1)
+        assert not far_ahead.done()
+
+        # The write that closes the gap is never held up by the one behind it.
+        await asyncio.wait_for(h.write(SEGMENT, data(4900, SEGMENT)), timeout=1)
+        ops.gate.set()
+        await asyncio.wait_for(far_ahead, timeout=5)
+        await h.close()
+        assert bytes(ops.received) == data(6000)
+
+    async def test_a_write_just_ahead_is_not_held_back(self, monkeypatch):
+        monkeypatch.setattr("tgdcfs.app.sftp.handles.STREAM_WINDOW_BYTES", 1000)
+        ops = SlowOps()
+        h = handle(ops)
+        await h.write(0, data(SEGMENT))
+
+        await asyncio.wait_for(h.write(SEGMENT, data(500, SEGMENT)), timeout=1)
+
+        ops.gate.set()
+        await h.close()
+
+    async def test_a_failed_upload_does_not_leave_a_writer_waiting(self, monkeypatch):
+        monkeypatch.setattr("tgdcfs.app.sftp.handles.STREAM_WINDOW_BYTES", 1000)
+        ops = SlowOps()
+        ops.fail_with = RuntimeError("telegram said no")
+        h = handle(ops)
+        await h.write(0, data(SEGMENT))
+        waiting = asyncio.create_task(h.write(5000, data(1000, 5000)))
+        await asyncio.sleep(0.05)
+
+        ops.gate.set()
+
+        with pytest.raises(RuntimeError, match="telegram said no"):
+            await asyncio.wait_for(waiting, timeout=5)
+        await h.abort()
+
+    async def test_what_has_been_sent_is_given_back_to_the_disk(self, monkeypatch):
+        monkeypatch.setattr("tgdcfs.app.sftp.handles._PUNCH_ALIGN", 4096)
+        ops = StreamingOps()
+        h = handle(ops)
+
+        await h.write(0, data(40_000))
+        await until(lambda: len(ops.received) == 40_000)
+        await until(lambda: h._punched >= 32_768)
+
+        if not h._can_punch:
+            pytest.skip("this filesystem cannot punch holes")
+        h._spool.seek(0)
+        assert h._spool.read(4096) == bytes(4096)  # gone from the disk
+        h._spool.seek(36_864)
+        assert h._spool.read(10) == data(40_000)[36_864:36_874]  # not yet sent
+        await h.close()
+        assert bytes(ops.received) == data(40_000)
+
+    async def test_a_filesystem_without_hole_punching_still_works(self, monkeypatch):
+        monkeypatch.setattr("tgdcfs.app.sftp.handles._punch_hole", lambda *a: False)
+        monkeypatch.setattr("tgdcfs.app.sftp.handles._PUNCH_ALIGN", 4096)
+        ops = StreamingOps()
+        h = handle(ops)
+
+        await h.write(0, data(40_000))
+        await h.close()
+
+        assert bytes(ops.received) == data(40_000)
+        assert h._can_punch is False

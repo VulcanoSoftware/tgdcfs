@@ -29,6 +29,33 @@ SPOOL_READ_CHUNK = 1024 * 1024
 # other, with the whole size known.
 STREAM_START_BYTES = 8 * 1024 * 1024
 
+# How far the client may run ahead of the upload before its writes wait, and
+# the granularity at which sent bytes are handed back to the filesystem.
+STREAM_WINDOW_BYTES = 128 * 1024 * 1024
+_PUNCH_ALIGN = 1024 * 1024
+
+
+def _punch_hole(fd: int, offset: int, length: int) -> bool:
+    """Give ``length`` bytes at ``offset`` of an open file back to the disk.
+
+    The file keeps its size and the range reads as zeros. Returns False when
+    the platform or filesystem cannot do it; the caller then stops trying.
+    """
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.fallocate.argtypes = [
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+        ]
+        keep_size, punch = 0x01, 0x02
+        return libc.fallocate(fd, keep_size | punch, offset, length) == 0
+    except (AttributeError, OSError):
+        return False
+
 
 class Handle:
     """Shared behaviour of the objects handed back to the SFTP layer."""
@@ -233,6 +260,8 @@ class WriteHandle(Handle):
         self._hwm = 0
         self._islands: list[tuple[int, int]] = []
         self._yielded = 0
+        self._punched = 0
+        self._can_punch = True
         self._finished = False
         self._aborted = False
         self._stream: Optional["asyncio.Task[object]"] = None
@@ -245,7 +274,25 @@ class WriteHandle(Handle):
     def size(self) -> int:
         return self._size
 
+    async def _wait_for_room(self, offset: int) -> None:
+        """Hold a write back while the upload is far behind the client.
+
+        Without this a client that is faster than the stores fills the
+        scratch disk. Judged on the write's offset, not its end, so the
+        write that closes a gap is never held up by the data behind it.
+        """
+        if self._stream is None:
+            return
+        async with self._cond:
+            await self._cond.wait_for(
+                lambda: offset - self._yielded <= STREAM_WINDOW_BYTES
+                or self._stream is None
+                or self._stream.done()
+                or self._aborted
+            )
+
     async def write(self, offset: int, data: bytes) -> None:
+        await self._wait_for_room(offset)
         async with self._lock:
             if self._closed:
                 raise ValueError("write on a closed handle")
@@ -327,6 +374,8 @@ class WriteHandle(Handle):
                 while self._islands and self._islands[0][0] <= self._hwm:
                     self._hwm = max(self._hwm, self._islands.pop(0)[1])
             if self._stream is None and self._hwm >= self._start_bytes:
+                # Sent bytes are released on disk, which needs a real file.
+                await asyncio.to_thread(self._spool.rollover)
                 self._stream = asyncio.create_task(
                     self._ops.upload_from_unsized_stream(
                         self._growing(),
@@ -374,7 +423,24 @@ class WriteHandle(Handle):
                 if not chunk:
                     raise RuntimeError(f"spool of {self._path} ended early")
                 offset += len(chunk)
+                await self._release_sent(offset)
                 yield chunk
+
+    async def _release_sent(self, sent: int) -> None:
+        """Free the spool behind what has gone to the stores, and wake writers."""
+        async with self._cond:
+            self._cond.notify_all()
+        upto = sent // _PUNCH_ALIGN * _PUNCH_ALIGN
+        if not self._can_punch or upto <= self._punched:
+            return
+        start = self._punched
+        self._can_punch = await asyncio.to_thread(self._punch_sync, start, upto - start)
+        if self._can_punch:
+            self._punched = upto
+
+    def _punch_sync(self, start: int, length: int) -> bool:
+        with self._io:
+            return _punch_hole(self._spool.fileno(), start, length)
 
     async def _iter_spool(self) -> AsyncIterator[bytes]:
         await asyncio.to_thread(self._spool.seek, 0)

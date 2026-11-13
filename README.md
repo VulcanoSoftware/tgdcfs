@@ -82,7 +82,7 @@ tgdcfs:
     # upload_buffer_dir: ''
     # write_behind: false         # answer an upload once it is buffered
     # write_behind_max_mb: 2048   # most data held back this way, 0 = no cap
-    # stream_uploads: false       # upload to Telegram while the client sends
+    # stream_uploads: true        # on by default; false = spool first, upload on close
     # stream_segment_mb: 256      # segment size for stores that cannot stream
 ```
 
@@ -157,7 +157,7 @@ does the same for WebDAV and SFTP with the data on disk. Off by default.
 Telegram has a documented way to upload a file whose length is not known in
 advance ("Streamed uploads" in the [API documentation](https://core.telegram.org/api/files)):
 every part is sent with `file_total_parts = -1` and only the last part says how
-many there were. With `stream_uploads: true` an SFTP upload uses it. Once a few
+many there were. An SFTP upload uses it by default (`stream_uploads: false` turns it off). Once a few
 MB have arrived the file is uploaded to Telegram while the client keeps sending,
 and when the client is done only the end of the file is left, so the second wait
 that made an SFTP upload take twice as long is gone.
