@@ -5,15 +5,6 @@ import base64
 import gzip
 from pathlib import Path
 
-# Public API declared for static type checkers (mypy). Values are
-# overwritten at import time by the embedded module payload below.
-BACKEND_NAME: str
-KEY_PREFIX: str
-PART_SIZE_DEFAULT: int
-PART_SIZE_PREMIUM: int
-MAX_TEXT_CHARS: int
-TelegramStore: type
-
 _dir = Path(__file__).parent
 _parts = [
     "store.payload.part0",
