@@ -13,7 +13,7 @@ slowest store, since a full buffer makes the primary's next read wait.
 
 The pieces:
 
-* :class:`TeeBranch` is one buffer: the producer ``feed``\\s chunks and
+* :class:`TeeBranch` is one buffer: the producer ``feed``\s chunks and
   waits while the branch holds ``capacity`` bytes; the consumer takes
   them off through ``stream``. ``finish`` marks the end of the bytes,
   ``detach`` drops the branch when its mirror failed so the producer is
@@ -35,7 +35,7 @@ import asyncio
 import logging
 from collections import deque
 from dataclasses import dataclass, field
-from typing import AsyncGenerator, Awaitable, Callable, Deque, Dict, List
+from typing import AsyncGenerator, Awaitable, Callable, Deque, Dict, List, Optional
 
 from tgdcfs.errors import TechnicalError
 from tgdcfs.reqres import Replica, UploadableFileMessage
@@ -121,16 +121,18 @@ class TeeFileMessage(UploadableFileMessage):
 
     inner: UploadableFileMessage = field(init=False)
     branches: List[TeeBranch] = field(init=False)
-    _total: int = field(init=False)
+    _total: Optional[int] = field(init=False)
     _fed: int = field(init=False, default=0)
 
     @classmethod
     def wrap(
         cls, inner: UploadableFileMessage, branches: List[TeeBranch]
     ) -> "TeeFileMessage":
+        # Preserve size=None so streaming uploads stay streaming through
+        # the tee (get_size() returns 0 when unknown).
         obj = cls(
             name=inner.name,
-            size=inner.get_size(),
+            size=inner.size,
             caption=inner.caption,
             tags=inner.tags,
             _offset=0,
@@ -140,7 +142,7 @@ class TeeFileMessage(UploadableFileMessage):
         )
         obj.inner = inner
         obj.branches = list(branches)
-        obj._total = inner.get_size()
+        obj._total = inner.size  # None when streamed
         obj._fed = 0
         return obj
 
@@ -157,7 +159,8 @@ class TeeFileMessage(UploadableFileMessage):
             self._fed += len(data)
             for branch in self.branches:
                 await branch.feed(data)
-            if self._fed >= self._total:
+            # Only auto-finish when total is known.
+            if self._total is not None and self._fed >= self._total:
                 await self.finish()
         return data
 
@@ -168,6 +171,8 @@ class TeeFileMessage(UploadableFileMessage):
     async def close(self) -> None:
         # Not the end of the stream: the Telegram uploader closes the
         # message after every part and reads on for the next one.
+        # For size=None streaming, signal EOF to branches on final close
+        # is handled by TeeUpload.collect calling finish().
         await self.inner.close()
 
     def file_name(self) -> str:
