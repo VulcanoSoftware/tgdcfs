@@ -130,12 +130,15 @@ class EncryptingFileContentRepository(IFileContentRepository):
         encrypted = EncryptingFileMessage.wrap(file_msg, file_key, header)
         # The cache below stages ciphertext under the version's id.
         encrypted.version_id = file_msg.version_id
+        # A negative size means the length is not known up front (a
+        # streamed upload) -- log it as such rather than as a number.
+        plain = file_msg.get_size()
+        cipher = encrypted.get_size()
         logger.debug(
-            "Encrypting file '%s': plaintext=%d ciphertext=%d chunks=%d",
+            "Encrypting file '%s': plaintext=%s ciphertext=%s",
             file_msg.name,
-            file_msg.get_size(),
-            encrypted.get_size(),
-            (file_msg.get_size() + self._chunk_size - 1) // self._chunk_size,
+            plain if plain >= 0 else "unknown",
+            cipher if cipher >= 0 else "unknown",
         )
         return await self._inner.save(encrypted)
 

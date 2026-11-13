@@ -10,7 +10,11 @@ plaintext message but emits encrypted bytes:
 where each ``chunk_i`` is ``nonce || ciphertext || tag``. The upload size
 declared to Telegram is computed up-front via
 :func:`ciphertext_size_for_plaintext` so the FileUploader can plan its parts
-exactly as it does for plaintext files.
+exactly as it does for plaintext files. When the plaintext length is not
+known up front (``inner.get_size() < 0``), the ciphertext length is
+reported as unknown too and the uploader streams the parts as they are
+produced -- the on-wire layout is identical, only the total is discovered
+at the end of the stream.
 
 The wrapper does its own internal chunking and buffering -- the FileUploader
 reads in ~512 KiB Telegram-chunks while we encrypt in (typically) 64 KiB
@@ -77,9 +81,20 @@ class EncryptingFileMessage(UploadableFileMessage):
             raise RuntimeError("serialized header has unexpected size")
 
         plaintext_size = inner.get_size()
-        ciphertext_size = HEADER_SIZE + ciphertext_size_for_plaintext(
-            plaintext_size, header.chunk_size
-        )
+        if plaintext_size < 0:
+            # The length is not known up front (an SFTP upload streams as
+            # the bytes arrive). The ciphertext length cannot be computed
+            # either -- each chunk adds its own overhead, so it depends on
+            # how the plaintext happens to split -- so we report unknown
+            # as well and let the uploader take the streamed path. The
+            # header is still emitted first and the chunks follow in
+            # order, so the layout on the wire is exactly the same as for
+            # a sized upload; only the total is discovered at the end.
+            ciphertext_size = -1
+        else:
+            ciphertext_size = HEADER_SIZE + ciphertext_size_for_plaintext(
+                plaintext_size, header.chunk_size
+            )
 
         msg = cls(
             name=inner.name,
@@ -151,11 +166,17 @@ class EncryptingFileMessage(UploadableFileMessage):
         """
         target = self.cipher.chunk_size
         buf = bytearray()
-        remaining_plaintext = self.inner.get_size() - self._plaintext_read
-        if remaining_plaintext <= 0:
-            return b""
-
-        want = min(target, remaining_plaintext)
+        total = self.inner.get_size()
+        if total >= 0:
+            remaining_plaintext = total - self._plaintext_read
+            if remaining_plaintext <= 0:
+                return b""
+            want = min(target, remaining_plaintext)
+        else:
+            # Unknown length: read a full chunk and let an empty answer
+            # mean the stream is over -- the same EOF contract an
+            # unknown-size stream gives its reader.
+            want = target
         while len(buf) < want:
             piece = await self.inner.read(want - len(buf))
             if not piece:
