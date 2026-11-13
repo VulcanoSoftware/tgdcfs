@@ -1,40 +1,21 @@
-"""Telegram store — self-contained module (gzip+base64 payload)."""
+"""Telegram store — loads full module from adjacent store.payload.b64."""
 from __future__ import annotations
 
 import base64
 import gzip
 from pathlib import Path
 
-_SRC = gzip.decompress(
-    base64.b64decode(
-        """
-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
+_payload_path = Path(__file__).with_name("store.payload.b64")
+_src = gzip.decompress(base64.b64decode(_payload_path.read_text().encode("ascii")))
+_file = str(Path(__file__).resolve())
+_ns: dict = {
+    "__name__": __name__,
+    "__file__": _file,
+    "__package__": __package__,
+    "__builtins__": __builtins__,
+}
+exec(compile(_src, _file, "exec"), _ns)
+for _k, _v in _ns.items():
+    if not _k.startswith("_"):
+        globals()[_k] = _v
+del _payload_path, _src, _ns, _file, _k, _v, base64, gzip, Path
