@@ -127,7 +127,10 @@ class TestWriteHandle:
 
         async def upload_from_stream(stream, size, remote):
             data = b"".join([chunk async for chunk in stream])
-            assert len(data) == size
+            # Streaming sequential SFTP puts pass size=None; spool path passes
+            # the known final size.
+            if size is not None:
+                assert len(data) == size
             ops.uploaded[remote] = data
 
         ops.upload_from_stream = mocker.AsyncMock(side_effect=upload_from_stream)

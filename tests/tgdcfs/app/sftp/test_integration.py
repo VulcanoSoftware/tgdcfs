@@ -74,9 +74,20 @@ def build_client(mocker, name: str, channel: FakeChannel) -> Client:
         return stream()
 
     async def upload(directory, file_msg):
-        # `touch` sends a FileMessageEmpty, which carries no readable body.
-        size = file_msg.size or 0
-        data = await file_msg.read(size) if size > 0 else b""
+        # `touch` sends a FileMessageEmpty (size=0). Sequential SFTP puts
+        # stream with size=None; drain the whole stream in that case.
+        if file_msg.size is None:
+            chunks: list[bytes] = []
+            while True:
+                chunk = await file_msg.read(1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            data = b"".join(chunks)
+        elif file_msg.size > 0:
+            data = await file_msg.read(file_msg.size)
+        else:
+            data = b""
         if not directory.find_files([file_msg.name]):
             channel.add_file(directory, file_msg.name, data)
         else:

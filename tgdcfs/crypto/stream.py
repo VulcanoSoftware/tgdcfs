@@ -7,10 +7,13 @@ plaintext message but emits encrypted bytes:
 
     [file_header (60 B)] [chunk_0] [chunk_1] ... [chunk_N]
 
-where each ``chunk_i`` is ``nonce || ciphertext || tag``. The upload size
-declared to Telegram is computed up-front via
-:func:`ciphertext_size_for_plaintext` so the FileUploader can plan its parts
-exactly as it does for plaintext files.
+where each ``chunk_i`` is ``nonce || ciphertext || tag``.
+
+When the plaintext size is known up front the ciphertext size is computed
+via :func:`ciphertext_size_for_plaintext` so the FileUploader can plan its
+parts. When the plaintext size is unknown (``inner.size is None``, used by
+SFTP sequential streaming) this wrapper also reports ``size=None`` so the
+uploader takes the official streamed-upload path (file_total_parts=-1).
 
 The wrapper does its own internal chunking and buffering -- the FileUploader
 reads in ~512 KiB Telegram-chunks while we encrypt in (typically) 64 KiB
@@ -21,6 +24,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from typing import Optional
 
 from tgdcfs.crypto.cipher import (
     ChunkedAESGCM,
@@ -38,8 +42,8 @@ class EncryptingFileMessage(UploadableFileMessage):
 
     The wrapped ``inner`` message is read on demand; we never load the whole
     plaintext into memory. ``size`` on this object reflects the *ciphertext*
-    size including the header, which is what the uploader uses to compute
-    Telegram parts and progress.
+    size including the header when known, or is ``None`` when the plaintext
+    size is unknown (streamed upload).
     """
 
     inner: UploadableFileMessage = field(init=False)
@@ -53,6 +57,9 @@ class EncryptingFileMessage(UploadableFileMessage):
     _chunk_index: int = field(default=0, init=False, repr=False)
     _plaintext_read: int = field(default=0, init=False, repr=False)
     _header_emitted: bool = field(default=False, init=False, repr=False)
+    # When the inner size is unknown we cannot bound reads by remaining
+    # plaintext; we just read until the inner stream ends.
+    _streaming: bool = field(default=False, init=False, repr=False)
 
     @classmethod
     def wrap(
@@ -66,6 +73,10 @@ class EncryptingFileMessage(UploadableFileMessage):
         ``file_key`` must already be derived from the master key + header
         salt by the caller. ``header`` provides the chunk size and the salt
         used for nonce construction.
+
+        If ``inner.size is None`` (streamed / size-unknown upload) this
+        wrapper also reports ``size=None`` so the Telegram uploader uses
+        the official streamed path.
         """
         cipher = ChunkedAESGCM(
             file_key=file_key,
@@ -76,10 +87,14 @@ class EncryptingFileMessage(UploadableFileMessage):
         if len(header_bytes) != HEADER_SIZE:
             raise RuntimeError("serialized header has unexpected size")
 
-        plaintext_size = inner.get_size()
-        ciphertext_size = HEADER_SIZE + ciphertext_size_for_plaintext(
-            plaintext_size, header.chunk_size
-        )
+        streaming = inner.size is None
+        if streaming:
+            ciphertext_size: Optional[int] = None
+        else:
+            plaintext_size = inner.get_size()
+            ciphertext_size = HEADER_SIZE + ciphertext_size_for_plaintext(
+                plaintext_size, header.chunk_size
+            )
 
         msg = cls(
             name=inner.name,
@@ -94,14 +109,15 @@ class EncryptingFileMessage(UploadableFileMessage):
         msg.inner = inner
         msg.cipher = cipher
         msg.header_bytes = header_bytes
+        msg._streaming = streaming
         return msg
 
     # -- UploadableFileMessage protocol ------------------------------------
 
     def _get_size(self) -> int:
-        # ``size`` is set explicitly in ``wrap`` and never falls back here,
-        # but the protocol requires this method to exist.
-        return self.size
+        # ``size`` is set explicitly in ``wrap``. When streaming it stays
+        # None and get_size() returns 0 (same contract as FileMessageFromStream).
+        return self.size if self.size is not None else 0
 
     async def open(self) -> None:
         await self.inner.open()
@@ -117,10 +133,9 @@ class EncryptingFileMessage(UploadableFileMessage):
     async def read(self, length: int) -> bytes:
         """Return up to ``length`` ciphertext bytes.
 
-        The contract matches ``FileMessageFromPath.read``: the uploader
-        already constrains the request to the remaining file size, so we
-        do not need to track an end-of-stream sentinel beyond producing
-        whatever the cipher emits.
+        When size is known the uploader already constrains the request to the
+        remaining file size. When size is unknown we keep producing until the
+        inner plaintext stream ends.
         """
         out = bytearray()
         while len(out) < length:
@@ -148,19 +163,27 @@ class EncryptingFileMessage(UploadableFileMessage):
 
         Loops in case the inner ``read`` returns short, which is allowed by
         the protocol (FileMessageFromStream in particular may do so).
+
+        When streaming (unknown size) we simply read up to chunk_size bytes
+        and treat an empty read as EOF.
         """
         target = self.cipher.chunk_size
         buf = bytearray()
-        remaining_plaintext = self.inner.get_size() - self._plaintext_read
-        if remaining_plaintext <= 0:
-            return b""
 
-        want = min(target, remaining_plaintext)
+        if not self._streaming:
+            remaining_plaintext = self.inner.get_size() - self._plaintext_read
+            if remaining_plaintext <= 0:
+                return b""
+            want = min(target, remaining_plaintext)
+        else:
+            want = target
+
         while len(buf) < want:
             piece = await self.inner.read(want - len(buf))
             if not piece:
-                # Inner stream ended earlier than its declared size -- treat
-                # what we have as the final (possibly short) chunk.
+                # Inner stream ended (early if size was known, or at true
+                # EOF when streaming). Treat what we have as the final
+                # (possibly short) chunk.
                 break
             buf += piece
 
