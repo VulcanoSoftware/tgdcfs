@@ -309,29 +309,19 @@ class TestConfig:
 
 
 class TestStreamConfig:
-    def test_streaming_is_on_by_default(self):
+    def test_the_default_segment_is_256_mb(self):
         cfg = SFTPConfig.from_dict({})
 
-        assert cfg.stream_uploads is True
         assert cfg.stream_segment_mb == 256
         assert cfg.stream_segment_bytes == 256 * 1024 * 1024
 
-    def test_it_can_be_turned_off(self):
-        cfg = SFTPConfig.from_dict({"stream_uploads": False})
+    def test_the_segment_size_can_be_set(self):
+        cfg = SFTPConfig.from_dict({"stream_segment_mb": 64})
 
-        assert cfg.stream_uploads is False
-        assert cfg.stream_segment_bytes == 0  # off means no segment size either
-
-    def test_turning_it_on_gives_the_segment_size(self):
-        cfg = SFTPConfig.from_dict({"stream_uploads": True, "stream_segment_mb": 64})
-
-        assert cfg.stream_uploads is True
         assert cfg.stream_segment_bytes == 64 * 1024 * 1024
 
-    def test_the_default_segment_applies_when_only_streaming_is_on(self):
-        cfg = SFTPConfig.from_dict({"stream_uploads": True})
-
-        assert cfg.stream_segment_bytes == 256 * 1024 * 1024
+    def test_there_is_no_switch_to_turn_streaming_off(self):
+        assert not hasattr(SFTPConfig.from_dict({}), "stream_uploads")
 
     @pytest.mark.parametrize("value", [0, -1, 1901, 4096])
     def test_a_segment_must_fit_one_telegram_document(self, value):

@@ -266,8 +266,7 @@ class SFTPConfig:
     (``0`` means no cap); a close that would exceed it is answered only
     once earlier uploads have finished.
 
-    ``stream_uploads`` goes further and makes the upload run *while* the
-    client is still sending. Telegram has a documented way to upload a file
+    Uploads always run *while* the client is still sending. Telegram has a documented way to upload a file
     whose length is not known yet ("streamed uploads": every part says
     ``file_total_parts = -1`` except the last), which is used for Telegram
     stores, so the file stays one document up to the 2 GB a message can
@@ -278,8 +277,7 @@ class SFTPConfig:
     end. Small files (a few MB) are unaffected. Data that has already been
     sent on cannot be rewritten, so a client that goes back to change
     earlier bytes (some ``sshfs`` workloads) gets an error on such a large
-    file. On by default; ``stream_uploads: false`` brings back the plain
-    spool-then-upload behaviour.
+    file.
     """
 
     enabled: bool
@@ -291,7 +289,6 @@ class SFTPConfig:
     upload_buffer_dir: Optional[str]
     write_behind: bool = False
     write_behind_max_mb: int = 2048
-    stream_uploads: bool = True
     stream_segment_mb: int = 256
 
     # A segment is one document, and a document is below 2 GB.
@@ -312,9 +309,7 @@ class SFTPConfig:
 
     @property
     def stream_segment_bytes(self) -> int:
-        """Segment size for stores that cannot stream; ``0`` when streaming is off."""
-        if not self.stream_uploads:
-            return 0
+        """Segment size for stores that cannot take a stream of unknown length."""
         return self.stream_segment_mb * 1024 * 1024
 
     @classmethod
@@ -371,7 +366,6 @@ class SFTPConfig:
             ),
             write_behind=bool(data.get("write_behind", False)),
             write_behind_max_mb=write_behind_max_mb,
-            stream_uploads=bool(data.get("stream_uploads", True)),
             stream_segment_mb=stream_segment_mb,
         )
 

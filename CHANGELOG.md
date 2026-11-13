@@ -23,11 +23,11 @@ the fact on the commits that shipped them.
   more than 128 MiB ahead of the upload. Before, the whole file stayed in the
   scratch space, which filled up on large files (`No space left on device`).
 
-- `tgdcfs.sftp.stream_uploads` (default `true`) and `stream_segment_mb`
+- SFTP uploads always stream, and `tgdcfs.sftp.stream_segment_mb`
   (default `256`, at most `1900`). An SFTP upload no longer has to be
   received in full before it goes to Telegram. Telegram documents an upload
   of unknown length ("Streamed uploads": `file_total_parts = -1` on every
-  part but the last), and with `stream_uploads` the file is uploaded while the
+  part but the last), and the file is uploaded while the
   client is still sending, as one document up to 2 GB, so only its end is
   left to send when the client is done. Stores that need the size first
   (Discord) get segments of `stream_segment_mb` instead. Bytes that were

@@ -115,7 +115,7 @@ file, and a client with an inactivity timeout gives up and re-uploads.
 
 Clients do not announce the size either (OpenSSH strips it from the
 attributes of OPEN on purpose). There are two ways out, below: upload while
-receiving with Telegram's streamed upload (`sftp.stream_uploads`), or change
+receiving with Telegram's streamed upload (always on), or change
 who waits: `sftp.write_behind` answers the CLOSE once the spool is complete.
 
 `PendingUploads` (`pending.py`) takes the finished spool and uploads it in a
@@ -149,7 +149,7 @@ needed for the normal flow, where the total is announced with every part; it
 never was a limit of the API, only of `FileUploader`, which used to compute
 `total_parts` from the size first.
 
-`sftp.stream_uploads` uses it:
+The SFTP server uses it:
 
 * `WriteHandle` tracks the prefix written without holes (`_hwm`). Once a few
   MB have arrived (`STREAM_START_BYTES`) it starts `Ops.upload_from_unsized_stream`

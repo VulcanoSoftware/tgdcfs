@@ -65,7 +65,7 @@ async def server(mocker, stack, users):
     config = mocker.Mock()
     config.tgdcfs.users = users
     config.tgdcfs.sftp = SFTPConfig.from_dict(
-        {"upload_buffer_size_mb": 0, "stream_uploads": True, "stream_segment_mb": 1}
+        {"upload_buffer_size_mb": 0, "stream_segment_mb": 1}
     )
     acceptor = await asyncssh.listen(
         host="127.0.0.1",

@@ -213,7 +213,7 @@ class WriteHandle(Handle):
       as the transfer itself.
     * With a ``pending`` registry (``sftp.write_behind``) the finished spool
       is handed over to it and the CLOSE is answered right away.
-    * With ``stream_segment_bytes`` (``sftp.stream_uploads``) the upload
+    * With ``stream_segment_bytes`` (always set by the server) the upload
       to the stores starts as soon as a few MB have arrived and keeps pace
       with the client, so at CLOSE only the end of the file is left. A
       store that can take a stream of unknown length (Telegram) gets it as
@@ -302,7 +302,7 @@ class WriteHandle(Handle):
                     raise ValueError(
                         f"cannot rewrite the first {self._yielded} bytes of "
                         f"{self._path}: they are already on their way to the "
-                        "stores (sftp.stream_uploads)"
+                        "stores"
                     )
                 await asyncio.to_thread(self._write_sync, offset, data)
             if self._segment_bytes:
