@@ -48,10 +48,15 @@ the fact on the commits that shipped them.
   (`upload.saveBigFilePart` with `file_total_parts = -1` per part, the real
   total only on the last part), and large files are sent as ≤ 2 GB document
   parts by the bot without needing a premium account. Writes that run ahead
-  of the upload are buffered up to `upload_buffer_size_mb`; a client that
-  rewrites an earlier part of the file before anything has been streamed
-  falls back to the old spool path, and a backwards write after streaming
-  has started is rejected.
+  of the upload are staged in a spooled buffer: in memory up to
+  `upload_buffer_size_mb`, on disk in `upload_buffer_dir` beyond that, so
+  strongly interleaved clients (sshfs, rclone with many requests in
+  flight) work whatever order their writes arrive in. The upload only
+  moves through a staged region once it is contiguous, and a gap no write
+  ever covers is zero-filled on close. A write that lands behind bytes
+  already streamed fails the upload rather than store a corrupted file,
+  and a jump further ahead than the new `sftp.max_ahead_gap_mb` (default
+  1024 MiB) is rejected.
 
 - WebDAV listings report a file's creation date as the date of its oldest
   version. It used to be the time of the listing.

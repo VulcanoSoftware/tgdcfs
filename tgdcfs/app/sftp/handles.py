@@ -3,7 +3,7 @@ import errno
 import logging
 import os
 import tempfile
-from typing import AsyncIterator, Dict, Optional
+from typing import AsyncIterator, List, Optional
 
 from tgdcfs.core import Ops
 from tgdcfs.errors import TechnicalError
@@ -19,13 +19,15 @@ SEEK_HOLE = getattr(os, "SEEK_HOLE", 4)
 # for the clients that leave small gaps (they typically skip a few kibibytes).
 SEEK_FORWARD_THRESHOLD = 1024 * 1024
 
-# How much of the spooled upload we hand to the uploader at a time.
-SPOOL_READ_CHUNK = 1024 * 1024
+# Staged bytes are handed to the uploader in pieces of this size, and the
+# zero-fill of a gap that no write ever covered goes out in pieces too.
+STAGED_CHUNK = 1024 * 1024
 
-# Writes that arrive ahead of the stream position are held until the gap
-# fills. Pipelined clients skip a few requests' worth of bytes at most; a
-# gap wider than this is treated as hostile and fails the upload.
-AHEAD_WINDOW_BYTES = 8 * 1024 * 1024
+# A write this far ahead of the upload stream is treated as hostile and
+# fails the upload. Everything short of it is staged: in memory up to
+# ``upload_buffer_size_mb``, on disk beyond that. Configurable through
+# ``sftp.max_ahead_gap_mb``.
+DEFAULT_MAX_AHEAD_GAP_BYTES = 1024 * 1024 * 1024
 
 
 class Handle:
@@ -143,30 +145,41 @@ class WriteHandle(Handle):
 
     SFTP never announces the size of an upload, and the stores accept a
     stream of unknown length (Telegram documents the protocol officially,
-    core.telegram.org/api/files, "Streamed uploads"), so sequential writes
-    are forwarded to the upload as they arrive. Nothing is buffered beyond
-    a small window: the queue between the writes and the uploader applies
-    backpressure, and writes that arrive slightly ahead of the stream --
-    pipelined clients routinely do -- are held until the gap fills.
+    core.telegram.org/api/files, "Streamed uploads"), so writes at the
+    stream's position are forwarded to the upload as they arrive: the
+    one-slot queue between the writes and the uploader applies
+    backpressure, and nothing touches the disk.
 
-    A write that lands behind the stream's position would need bytes that
-    are already on the wire. Before anything has been streamed the handle
-    falls back to the old spool -- in memory up to ``spool_max_bytes``, on
-    disk beyond that -- and commits on close, as it always did; once bytes
-    have left, the upload fails rather than store a corrupted file.
+    Writes that arrive ahead of the position -- pipelined clients send
+    several requests at once, and sshfs or rclone may have many in flight
+    -- are staged in a spooled buffer: in memory up to
+    ``buffer_max_bytes``, on disk in ``buffer_dir`` beyond that. The
+    upload moves through the staged region only while it is contiguous
+    from the stream's position, so the bytes always reach the stores in
+    file order and the stream waits for a gap to be filled by the write
+    that belongs there. A gap that is never filled is zero-filled on
+    close, exactly as a sparse write deserves.
+
+    A write that lands behind the stream's position needs bytes that are
+    already on the wire, so the upload fails rather than store a corrupted
+    file. A forward jump wider than ``max_gap_bytes`` is treated as
+    hostile and fails the same way; within that bound the client may write
+    as far ahead as it likes, the disk takes the overflow.
     """
 
     def __init__(
         self,
         ops: Ops,
         path: str,
-        spool_max_bytes: int,
-        spool_dir: Optional[str] = None,
+        buffer_max_bytes: int,
+        buffer_dir: Optional[str] = None,
+        max_gap_bytes: int = DEFAULT_MAX_AHEAD_GAP_BYTES,
     ):
         self._ops = ops
         self._path = path
-        self._spool_max_bytes = spool_max_bytes
-        self._spool_dir = spool_dir
+        self._buffer_max_bytes = buffer_max_bytes
+        self._buffer_dir = buffer_dir
+        self._max_gap_bytes = max_gap_bytes
 
         self._queue: Optional[asyncio.Queue[Optional[bytes]]] = None
         self._task: Optional[asyncio.Task] = None
@@ -175,13 +188,14 @@ class WriteHandle(Handle):
 
         # ``_pos`` is what the upload stream has been handed, ``_size`` the
         # highest byte the client wrote; the two differ by whatever is
-        # queued or held in ``_pending``.
+        # queued or staged.
         self._pos = 0
         self._size = 0
-        self._pending: Dict[int, bytes] = {}
-        self._pending_bytes = 0
+        # The written-but-not-yet-streamed ranges, merged and sorted; the
+        # bytes themselves sit in ``_staging`` at their file offsets.
+        self._staged: List[List[int]] = []
+        self._staging: Optional[tempfile.SpooledTemporaryFile] = None
 
-        self._spool: Optional[tempfile.SpooledTemporaryFile] = None
         self._dirty = False
         self._closed = False
         self._error: Optional[Exception] = None
@@ -199,16 +213,22 @@ class WriteHandle(Handle):
         async with self._lock:
             if self._closed:
                 raise ValueError("write on a closed handle")
-            if self._spool is not None:
-                await asyncio.to_thread(self._write_sync, offset, data)
+            self._raise_if_failed()
+            if not data:
                 return
-            if offset < self._pos or self._overlaps_pending(offset, len(data)):
-                self._fallback_or_fail(offset, data)
-                return
-            if offset > self._pos:
-                self._stage_ahead(offset, data)
-                return
-            await self._stream(offset, data)
+            if offset < self._pos:
+                raise TechnicalError(
+                    f"Write at offset {offset} of {self._path} lands behind bytes "
+                    f"that were already streamed"
+                )
+            if offset > self._pos or self._overlaps_staged(offset, len(data)):
+                await self._stage(offset, data)
+            else:
+                self._dirty = True
+                await self._enqueue(data)
+                self._advance(offset + len(data))
+            # A staged write may have filled the gap at the position.
+            await self._drain()
 
     async def close(self) -> None:
         """Finish the upload as a new version of the file."""
@@ -216,25 +236,19 @@ class WriteHandle(Handle):
             if self._closed:
                 return
             self._closed = True
-            if self._spool is not None:
-                try:
-                    if self._dirty:
-                        await self._ops.upload_from_stream(
-                            self._iter_spool(), self._size, self._path
-                        )
-                finally:
-                    await asyncio.to_thread(self._spool.close)
-                return
-            if not self._dirty:
-                if self._task is not None:
-                    await asyncio.gather(self._task, return_exceptions=True)
-                return
-            await self._flush_pending()
-            self._raise_if_failed()
-            _, task = self._ensure_task()
-            await self._enqueue(None)
-            await task
-            self._raise_if_failed()
+            try:
+                if not self._dirty:
+                    if self._task is not None:
+                        await asyncio.gather(self._task, return_exceptions=True)
+                    return
+                await self._flush_staged()
+                self._raise_if_failed()
+                _, task = self._ensure_task()
+                await self._enqueue(None)
+                await task
+                self._raise_if_failed()
+            finally:
+                await self._close_staging()
 
     async def abort(self) -> None:
         """Drop the upload without touching the stored file."""
@@ -245,75 +259,104 @@ class WriteHandle(Handle):
             if self._task is not None:
                 self._task.cancel()
                 await asyncio.gather(self._task, return_exceptions=True)
-            if self._spool is not None:
-                await asyncio.to_thread(self._spool.close)
+            await self._close_staging()
 
     # -- streaming ---------------------------------------------------------
 
-    async def _stream(self, offset: int, data: bytes) -> None:
-        if data:
-            await self._enqueue(data)
+    async def _stage(self, offset: int, data: bytes) -> None:
+        span = offset + len(data) - self._pos
+        if span > self._max_gap_bytes:
+            raise TechnicalError(
+                f"Write at offset {offset} of {self._path} runs "
+                f"{span} bytes ahead of the upload stream; the most that "
+                f"is accepted is {self._max_gap_bytes}"
+            )
+        await asyncio.to_thread(self._write_staging, offset, data)
+        self._add_staged(offset, offset + len(data))
         self._dirty = True
-        self._advance(offset + len(data))
-        # Writes that arrived ahead of the stream may line up now.
-        while self._pending and min(self._pending) == self._pos:
-            chunk = self._pending.pop(min(self._pending))
-            self._pending_bytes -= len(chunk)
-            await self._enqueue(chunk)
-            self._advance(self._pos + len(chunk))
+        self._size = max(self._size, offset + len(data))
+
+    async def _drain(self) -> None:
+        # Only a region contiguous from the position may stream: a gap can
+        # still be filled by the write that belongs there.
+        while self._staged and self._staged[0][0] == self._pos:
+            start, end = self._staged.pop(0)
+            await self._enqueue_staged(start, end)
+            self._advance(end)
+
+    async def _flush_staged(self) -> None:
+        """Hand every staged write to the uploader, zero-filling the gaps."""
+        while self._staged:
+            start, end = self._staged.pop(0)
+            if start > self._pos:
+                await self._enqueue_zeros(start - self._pos)
+                self._advance(start)
+            await self._enqueue_staged(start, end)
+            self._advance(end)
 
     def _advance(self, end: int) -> None:
         self._size = max(self._size, end)
         self._pos = end
 
-    def _stage_ahead(self, offset: int, data: bytes) -> None:
-        # The window bounds the whole unstreamed span -- the gap plus the
-        # held writes -- since the gap is zero-filled into the queue when
-        # the missing writes never come.
-        if offset + len(data) - self._pos > AHEAD_WINDOW_BYTES:
+    def _add_staged(self, start: int, end: int) -> None:
+        intervals: List[List[int]] = []
+        for s, e in self._staged:
+            if e < start or s > end:
+                intervals.append([s, e])
+            else:
+                start, end = min(start, s), max(end, e)
+        intervals.append([start, end])
+        intervals.sort()
+        self._staged = intervals
+
+    def _overlaps_staged(self, offset: int, length: int) -> bool:
+        return any(s < offset + length and offset < e for s, e in self._staged)
+
+    def _write_staging(self, offset: int, data: bytes) -> None:
+        if self._staging is None:
+            self._staging = tempfile.SpooledTemporaryFile(
+                max_size=self._buffer_max_bytes, dir=self._buffer_dir
+            )
+        if offset + len(data) > self._buffer_max_bytes:
+            # A seek far beyond the end inflates the in-memory buffer with
+            # the gap before the rollover check ever sees it; go to disk
+            # first, where the gap costs nothing.
+            self._staging.rollover()
+        self._staging.seek(offset)
+        self._staging.write(data)
+
+    def _read_staging(self, offset: int, count: int) -> bytes:
+        staging = self._staging
+        if staging is None:
             raise TechnicalError(
-                f"Write at offset {offset} of {self._path} is too far ahead "
-                f"of the upload stream to be buffered"
+                f"The upload of {self._path} has no staging buffer to read from"
             )
-        self._pending[offset] = data
-        self._pending_bytes += len(data)
-        self._dirty = True
-        self._size = max(self._size, offset + len(data))
+        staging.seek(offset)
+        return staging.read(count)
 
-    def _overlaps_pending(self, offset: int, length: int) -> bool:
-        return any(
-            start < offset + length and offset < start + len(data)
-            for start, data in self._pending.items()
-        )
+    async def _enqueue_staged(self, start: int, end: int) -> None:
+        offset = start
+        while offset < end:
+            count = min(STAGED_CHUNK, end - offset)
+            data = await asyncio.to_thread(self._read_staging, offset, count)
+            if not data:
+                raise TechnicalError(
+                    f"The staged bytes at {offset} of {self._path} are gone"
+                )
+            await self._enqueue(data)
+            offset += len(data)
 
-    def _fallback_or_fail(self, offset: int, data: bytes) -> None:
-        if self._pos == 0:
-            # Nothing has been handed to the uploader: the whole payload
-            # still sits in ``_pending``, so the spool can take over.
-            self._spool = tempfile.SpooledTemporaryFile(
-                max_size=self._spool_max_bytes, dir=self._spool_dir
-            )
-            for start in sorted(self._pending):
-                self._write_sync(start, self._pending[start])
-            self._pending.clear()
-            self._pending_bytes = 0
-            self._write_sync(offset, data)
-            return
-        raise TechnicalError(
-            f"Write at offset {offset} of {self._path} lands behind bytes "
-            f"that were already streamed"
-        )
+    async def _enqueue_zeros(self, count: int) -> None:
+        while count > 0:
+            size = min(STAGED_CHUNK, count)
+            await self._enqueue(b"\x00" * size)
+            count -= size
 
-    async def _flush_pending(self) -> None:
-        """Hand every held write to the uploader, zero-filling the gaps."""
-        while self._pending:
-            start = min(self._pending)
-            if start > self._pos:
-                await self._enqueue(b"\x00" * (start - self._pos))
-            chunk = self._pending.pop(start)
-            self._pending_bytes -= len(chunk)
-            await self._enqueue(chunk)
-            self._advance(start + len(chunk))
+    async def _close_staging(self) -> None:
+        staging, self._staging = self._staging, None
+        self._staged = []
+        if staging is not None:
+            await asyncio.to_thread(staging.close)
 
     def _ensure_task(
         self,
@@ -375,31 +418,3 @@ class WriteHandle(Handle):
     def _raise_if_failed(self) -> None:
         if self._error is not None:
             raise self._error
-
-    # -- spool fallback ------------------------------------------------------
-
-    def _write_sync(self, offset: int, data: bytes) -> None:
-        spool = self._spool
-        if spool is None:
-            raise TechnicalError(f"The upload of {self._path} has no spool to write to")
-        spool.seek(offset)
-        spool.write(data)
-        self._size = max(self._size, offset + len(data))
-        self._dirty = True
-
-    async def _iter_spool(self) -> AsyncIterator[bytes]:
-        spool = self._spool
-        if spool is None:
-            raise TechnicalError(
-                f"The upload of {self._path} has no spool to read from"
-            )
-        await asyncio.to_thread(spool.seek, 0)
-        remaining = self._size
-        while remaining > 0:
-            chunk = await asyncio.to_thread(
-                spool.read, min(SPOOL_READ_CHUNK, remaining)
-            )
-            if not chunk:
-                break
-            remaining -= len(chunk)
-            yield chunk

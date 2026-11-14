@@ -5,7 +5,6 @@ import os
 import pytest
 
 from tgdcfs.app.sftp.handles import (
-    AHEAD_WINDOW_BYTES,
     SEEK_DATA,
     SEEK_FORWARD_THRESHOLD,
     SEEK_HOLE,
@@ -140,7 +139,7 @@ class TestWriteHandle:
         return ops
 
     async def test_sequential_writes_are_uploaded_in_order(self, ops):
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
         await handle.write(0, b"hello ")
         await handle.write(6, b"world")
         await handle.close()
@@ -148,7 +147,7 @@ class TestWriteHandle:
         assert ops.uploaded == {"/file.bin": b"hello world"}
 
     async def test_out_of_order_writes_land_at_their_offset(self, ops):
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
         await handle.write(6, b"world")
         await handle.write(0, b"hello ")
         await handle.close()
@@ -156,7 +155,7 @@ class TestWriteHandle:
         assert ops.uploaded["/file.bin"] == b"hello world"
 
     async def test_sparse_writes_are_zero_filled(self, ops):
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
         await handle.write(4, b"tail")
         await handle.close()
 
@@ -164,27 +163,27 @@ class TestWriteHandle:
 
     async def test_payload_larger_than_the_spool_is_uploaded_intact(self, ops):
         payload = bytes(range(256)) * 512  # 128 KiB, well past the spool limit
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
         await handle.write(0, payload)
         await handle.close()
 
         assert ops.uploaded["/file.bin"] == payload
 
     async def test_close_without_any_write_uploads_nothing(self, ops):
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
         await handle.close()
 
         ops.upload_from_stream.assert_not_awaited()
 
     async def test_abort_uploads_nothing(self, ops):
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
         await handle.write(0, b"partial")
         await handle.abort()
 
         ops.upload_from_stream.assert_not_awaited()
 
     async def test_close_after_abort_does_not_upload(self, ops):
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
         await handle.write(0, b"partial")
         await handle.abort()
         await handle.close()
@@ -192,14 +191,14 @@ class TestWriteHandle:
         ops.upload_from_stream.assert_not_awaited()
 
     async def test_write_after_close_is_rejected(self, ops):
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
         await handle.close()
 
         with pytest.raises(ValueError):
             await handle.write(0, b"late")
 
     async def test_sequential_writes_stream_with_unknown_size(self, ops):
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
         await handle.write(0, b"hello ")
         await handle.write(6, b"world")
         await handle.close()
@@ -216,7 +215,7 @@ class TestWriteHandle:
 
         ops.upload_from_stream = mocker.AsyncMock(side_effect=upload_from_stream)
 
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
         await handle.write(0, b"first")
         await asyncio.sleep(0.05)
         assert seen == [b"first"]
@@ -225,24 +224,26 @@ class TestWriteHandle:
         await handle.close()
         assert b"".join(seen) == b"firstsecond"
 
-    async def test_gap_wider_than_the_window_fails_the_upload(self, ops):
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+    async def test_a_write_beyond_the_max_gap_fails_the_upload(self, ops):
+        handle = WriteHandle(
+            ops, "/file.bin", buffer_max_bytes=1024, max_gap_bytes=1024
+        )
         await handle.write(0, b"start")
 
         with pytest.raises(Exception):
-            await handle.write(AHEAD_WINDOW_BYTES + 10, b"far")
+            await handle.write(2048, b"far ahead")
 
     async def test_write_behind_streamed_bytes_fails(self, ops):
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
         await handle.write(0, b"already streamed")
 
         with pytest.raises(Exception):
             await handle.write(2, b"backwards")
 
-    async def test_write_behind_stream_position_before_any_stream_falls_back(self, ops):
-        # Both writes land in the ahead-window, so nothing has been
-        # streamed yet and the second one may still overwrite.
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+    async def test_a_rewrite_of_staged_bytes_lands_before_anything_streams(self, ops):
+        # Nothing has been streamed yet, so the second write may still
+        # overwrite the staged bytes in place.
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
         await handle.write(6, b"world")
         await handle.write(6, b"WORLD")
         await handle.write(0, b"hello ")
@@ -259,7 +260,7 @@ class TestWriteHandle:
 
         ops.upload_from_stream = mocker.AsyncMock(side_effect=upload_from_stream)
 
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
         await handle.write(0, b"data")
         await asyncio.sleep(0.05)
 
