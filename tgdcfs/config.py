@@ -252,6 +252,38 @@ class SFTPConfig:
     directory when empty). SFTP never announces the file size up front
     while Telegram uploads need it, so a whole file has to be buffered
     before it can be sent.
+
+    That buffering makes an upload take twice: the client first sends the
+    file here, and only when it closes the file does the upload to
+    Telegram start, while the client waits at 100% for the answer (and
+    some clients give up after 20 seconds of silence and start over).
+    ``write_behind`` answers the close as soon as the file is buffered and
+    finishes the upload in the background. Reads, ``stat`` and listings
+    already show the new file, but it is only safe in the stores once the
+    background upload is done: a crash or restart before that loses it,
+    and a failure is logged instead of reported to the client. Off by
+    default. ``write_behind_max_mb`` caps the data held back this way
+    (``0`` means no cap); a close that would exceed it is answered only
+    once earlier uploads have finished.
+
+    ``stream_window_mb`` is how far a client may run ahead of the upload
+    before its writes are held back, which is what keeps a fast client from
+    filling the scratch disk. ``0`` (the default) sizes it automatically
+    from the free space of the disk the upload is buffered on; a positive
+    value fixes it.
+
+    Uploads always run *while* the client is still sending. Telegram has a documented way to upload a file
+    whose length is not known yet ("streamed uploads": every part says
+    ``file_total_parts = -1`` except the last), which is used for Telegram
+    stores, so the file stays one document up to the 2 GB a message can
+    hold and only the last part is left to send when the client is done.
+    Stores that need a part's size first (Discord) get the file in segments
+    of ``stream_segment_mb`` instead: a segment is uploaded as soon as it
+    is full, and a larger segment means fewer parts but a longer wait at the
+    end. Small files (a few MB) are unaffected. Data that has already been
+    sent on cannot be rewritten, so a client that goes back to change
+    earlier bytes (some ``sshfs`` workloads) gets an error on such a large
+    file.
     """
 
     enabled: bool
@@ -261,14 +293,38 @@ class SFTPConfig:
     authorized_keys_dir: Optional[str]
     upload_buffer_size_mb: int
     upload_buffer_dir: Optional[str]
+    write_behind: bool = False
+    write_behind_max_mb: int = 2048
+    stream_segment_mb: int = 256
+    stream_window_mb: int = 0
 
+    # A segment is one document, and a document is below 2 GB.
+    MAX_STREAM_SEGMENT_MB = 1900
+    DEFAULT_STREAM_SEGMENT_MB = 256
+    # 0 = work the window out from the free space of the spool disk.
+    DEFAULT_STREAM_WINDOW_MB = 0
     DEFAULT_PORT = 2222
+    DEFAULT_WRITE_BEHIND_MAX_MB = 2048
     DEFAULT_HOST_KEY_FILE = "sftp_host_key"
     DEFAULT_UPLOAD_BUFFER_SIZE_MB = 64
 
     @property
     def upload_buffer_size_bytes(self) -> int:
         return self.upload_buffer_size_mb * 1024 * 1024
+
+    @property
+    def stream_window_bytes(self) -> int:
+        """Manual stream window in bytes; ``0`` means size it automatically."""
+        return self.stream_window_mb * 1024 * 1024
+
+    @property
+    def write_behind_max_bytes(self) -> int:
+        return self.write_behind_max_mb * 1024 * 1024
+
+    @property
+    def stream_segment_bytes(self) -> int:
+        """Segment size for stores that cannot take a stream of unknown length."""
+        return self.stream_segment_mb * 1024 * 1024
 
     @classmethod
     def from_dict(cls, data: Optional[dict]) -> "SFTPConfig":
@@ -284,6 +340,32 @@ class SFTPConfig:
         if buffer_size_mb < 0:
             raise ValueError(
                 f"sftp.upload_buffer_size_mb must not be negative, got {buffer_size_mb}"
+            )
+
+        write_behind_max_mb = int(
+            data.get("write_behind_max_mb", cls.DEFAULT_WRITE_BEHIND_MAX_MB)
+        )
+        if write_behind_max_mb < 0:
+            raise ValueError(
+                f"sftp.write_behind_max_mb must not be negative, "
+                f"got {write_behind_max_mb}"
+            )
+
+        stream_segment_mb = int(
+            data.get("stream_segment_mb", cls.DEFAULT_STREAM_SEGMENT_MB)
+        )
+        if not 1 <= stream_segment_mb <= cls.MAX_STREAM_SEGMENT_MB:
+            raise ValueError(
+                f"sftp.stream_segment_mb must be between 1 and "
+                f"{cls.MAX_STREAM_SEGMENT_MB}, got {stream_segment_mb}"
+            )
+
+        stream_window_mb = int(
+            data.get("stream_window_mb", cls.DEFAULT_STREAM_WINDOW_MB)
+        )
+        if stream_window_mb < 0:
+            raise ValueError(
+                f"sftp.stream_window_mb must not be negative, got {stream_window_mb}"
             )
 
         return cls(
@@ -304,6 +386,10 @@ class SFTPConfig:
                 if data.get("upload_buffer_dir")
                 else None
             ),
+            write_behind=bool(data.get("write_behind", False)),
+            write_behind_max_mb=write_behind_max_mb,
+            stream_segment_mb=stream_segment_mb,
+            stream_window_mb=stream_window_mb,
         )
 
 

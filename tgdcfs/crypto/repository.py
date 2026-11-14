@@ -130,13 +130,16 @@ class EncryptingFileContentRepository(IFileContentRepository):
         encrypted = EncryptingFileMessage.wrap(file_msg, file_key, header)
         # The cache below stages ciphertext under the version's id.
         encrypted.version_id = file_msg.version_id
-        logger.debug(
-            "Encrypting file '%s': plaintext=%d ciphertext=%d chunks=%d",
-            file_msg.name,
-            file_msg.get_size(),
-            encrypted.get_size(),
-            (file_msg.get_size() + self._chunk_size - 1) // self._chunk_size,
-        )
+        if file_msg.unsized:
+            logger.debug("Encrypting file '%s' of unknown size", file_msg.name)
+        else:
+            logger.debug(
+                "Encrypting file '%s': plaintext=%d ciphertext=%d chunks=%d",
+                file_msg.name,
+                file_msg.get_size(),
+                encrypted.get_size(),
+                (file_msg.get_size() + self._chunk_size - 1) // self._chunk_size,
+            )
         return await self._inner.save(encrypted)
 
     def _remember_header(

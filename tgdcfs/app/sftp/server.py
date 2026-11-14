@@ -48,8 +48,9 @@ from tgdcfs.errors import (
 )
 
 from .attrs import dir_attrs, file_attrs, root_attrs
-from .handles import ReadHandle, WriteHandle
+from .handles import ReadHandle, SpoolReadHandle, WriteHandle
 from .paths import ResolvedPath, normalize, resolve
+from .pending import PendingUpload, PendingUploads
 
 logger = logging.getLogger(__name__)
 
@@ -194,15 +195,22 @@ class TGFSSFTPServer(asyncssh.SFTPServer):
     """
 
     def __init__(
-        self, chan: asyncssh.SSHServerChannel, clients: Clients, config: Config
+        self,
+        chan: asyncssh.SSHServerChannel,
+        clients: Clients,
+        config: Config,
+        pending: Optional[PendingUploads] = None,
     ):
         super().__init__(chan)
         self._clients = clients
         self._config = config
+        # Set with ``sftp.write_behind``: uploads are answered once spooled
+        # and finished in the background (see ``pending.py``).
+        self._pending = pending
         self._user: User = chan.get_extra_info(USER_INFO_KEY) or ReadonlyUser(
             "anonymous"
         )
-        self._handles: List[Union[ReadHandle, WriteHandle]] = []
+        self._handles: List[Union[ReadHandle, SpoolReadHandle, WriteHandle]] = []
 
     # ------------------------------------------------------------------
     # helpers
@@ -235,6 +243,15 @@ class TGFSSFTPServer(asyncssh.SFTPServer):
 
     async def _file_attrs(self, resolved: ResolvedPath) -> SFTPAttrs:
         client = self._client(resolved.client_name)
+        if (pending := self._pending_upload(resolved)) is not None:
+            # Acknowledged but not in the stores yet: what is stored is
+            # still the empty placeholder, the client wants what it sent.
+            return file_attrs(
+                size=pending.size,
+                created_ms=pending.modified_ms,
+                modified_ms=pending.modified_ms,
+                readonly=self._readonly,
+            )
         fr = Ops(client).stat_file(resolved.relative)
         # The stat API reports the logical size: with encryption on that is
         # the plaintext length, which is what the client will get. It is the
@@ -246,6 +263,24 @@ class TGFSSFTPServer(asyncssh.SFTPServer):
             modified_ms=stat.modified_at,
             readonly=self._readonly,
         )
+
+    def _pending_upload(self, resolved: ResolvedPath) -> Optional[PendingUpload]:
+        if self._pending is None:
+            return None
+        return self._pending.get(resolved.client_name, resolved.relative)
+
+    async def _settle(self, resolved: ResolvedPath, *, below: bool = False) -> None:
+        """Let uploads still on their way to the stores finish first.
+
+        Removing or moving a file that is still being uploaded in the
+        background would race that upload and bring the file back.
+        """
+        if self._pending is None:
+            return
+        if below:
+            await self._pending.wait_under(resolved.client_name, resolved.relative)
+        else:
+            await self._pending.wait(resolved.client_name, resolved.relative)
 
     def _dir_entry_attrs(self, directory: TGFSDirectory) -> SFTPAttrs:
         return dir_attrs(
@@ -281,9 +316,7 @@ class TGFSSFTPServer(asyncssh.SFTPServer):
 
     @translate_errors
     async def fstat(self, file_obj: object) -> SFTPAttrs:
-        if isinstance(file_obj, ReadHandle):
-            return file_attrs(file_obj.size, 0, 0, self._readonly)
-        if isinstance(file_obj, WriteHandle):
+        if isinstance(file_obj, (ReadHandle, SpoolReadHandle, WriteHandle)):
             return file_attrs(file_obj.size, 0, 0, self._readonly)
         raise asyncssh.SFTPInvalidHandle("Invalid file handle")
 
@@ -411,7 +444,14 @@ class TGFSSFTPServer(asyncssh.SFTPServer):
         # Fold it back so there is a single open implementation.
         return await self.open(path, _pflags_from_v56(desired_access, flags), attrs)
 
-    async def _open_for_read(self, resolved: ResolvedPath) -> ReadHandle:
+    async def _open_for_read(
+        self, resolved: ResolvedPath
+    ) -> Union[ReadHandle, SpoolReadHandle]:
+        if (pending := self._pending_upload(resolved)) is not None:
+            spooled = SpoolReadHandle(pending)
+            self._handles.append(spooled)
+            return spooled
+
         client = self._client(resolved.client_name)
         ops = Ops(client)
         fd = await ops.desc(resolved.relative)
@@ -451,6 +491,10 @@ class TGFSSFTPServer(asyncssh.SFTPServer):
             path=resolved.relative,
             spool_max_bytes=sftp_cfg.upload_buffer_size_bytes,
             spool_dir=sftp_cfg.upload_buffer_dir,
+            pending=self._pending,
+            client_name=resolved.client_name,
+            stream_segment_bytes=sftp_cfg.stream_segment_bytes,
+            stream_window_bytes=sftp_cfg.stream_window_bytes,
         )
         self._handles.append(handle)
         return handle
@@ -472,7 +516,7 @@ class TGFSSFTPServer(asyncssh.SFTPServer):
 
     @translate_errors
     async def read(self, file_obj: object, offset: int, size: int) -> bytes:
-        if not isinstance(file_obj, ReadHandle):
+        if not isinstance(file_obj, (ReadHandle, SpoolReadHandle)):
             raise asyncssh.SFTPFailure("File is not open for reading")
         return await file_obj.read(offset, size)
 
@@ -486,7 +530,7 @@ class TGFSSFTPServer(asyncssh.SFTPServer):
 
     @translate_errors
     async def close(self, file_obj: object) -> None:
-        if not isinstance(file_obj, (ReadHandle, WriteHandle)):
+        if not isinstance(file_obj, (ReadHandle, SpoolReadHandle, WriteHandle)):
             return
         try:
             await file_obj.close()
@@ -524,6 +568,7 @@ class TGFSSFTPServer(asyncssh.SFTPServer):
         resolved = resolve(path)
         if resolved.is_root or resolved.is_client_root:
             raise asyncssh.SFTPPermissionDenied("Cannot remove a client root")
+        await self._settle(resolved)
         await self._ops(resolved).rm_file(resolved.relative)
 
     @translate_errors
@@ -552,6 +597,8 @@ class TGFSSFTPServer(asyncssh.SFTPServer):
             raise asyncssh.SFTPOpUnsupported("Moving between clients is not supported")
 
         ops = self._ops(source)
+        await self._settle(source, below=True)
+        await self._settle(target, below=True)
         source_is_dir = self._is_dir(source)
         if not source_is_dir:
             # Raises FileOrDirectoryDoesNotExist when there is nothing to move.
@@ -657,10 +704,10 @@ def _pflags_from_v56(desired_access: int, flags: int) -> int:
 
 
 def make_sftp_factory(
-    clients: Clients, config: Config
+    clients: Clients, config: Config, pending: Optional[PendingUploads] = None
 ) -> Callable[[asyncssh.SSHServerChannel], TGFSSFTPServer]:
     def factory(chan: asyncssh.SSHServerChannel) -> TGFSSFTPServer:
-        return TGFSSFTPServer(chan, clients, config)
+        return TGFSSFTPServer(chan, clients, config, pending)
 
     return factory
 

@@ -408,6 +408,10 @@ class TelegramStore(MessageBroker, IStore):
                 await asyncio.sleep(SEND_RETRY_INTERVAL)
 
     @property
+    def streams_unsized_uploads(self) -> bool:
+        return True
+
+    @property
     def read_slots(self) -> int:
         # The same fan-out the store uses for its own split downloads.
         return _transfer().download_pieces_in_flight
@@ -438,6 +442,9 @@ class TelegramStore(MessageBroker, IStore):
         client in that time made WebDAV clients give up on an idle
         connection (FileZilla after 20 seconds).
         """
+        if file_msg.unsized:
+            return await self._upload_unsized(file_msg)
+
         size = file_msg.get_size()
         file_name = file_msg.name or "unnamed"
         part_size, premium_upload = self._part_size_for(size)
@@ -452,7 +459,9 @@ class TelegramStore(MessageBroker, IStore):
             async def send(index: int) -> SentFileMessage:
                 async with slots:
                     part_msg = part_of(offsets[index], parts[index])
-                    part_msg.name = f"[part{index + 1}]{file_name}"
+                    part_msg.name = (
+                        f"[part{file_msg.part_offset + index + 1}]{file_name}"
+                    )
                     part_msg.size = parts[index]
                     return await self._send_file(
                         part_msg, use_account_api=premium_upload
@@ -470,7 +479,7 @@ class TelegramStore(MessageBroker, IStore):
         sends: List[asyncio.Task[SentFileMessage]] = []
         try:
             for i, part in enumerate(parts):
-                file_msg.name = f"[part{i + 1}]{file_name}"
+                file_msg.name = f"[part{file_msg.part_offset + i + 1}]{file_name}"
                 file_msg.size = part
                 uploader, uploaded = await self._upload_part(
                     file_msg, use_account_api=premium_upload
@@ -487,6 +496,66 @@ class TelegramStore(MessageBroker, IStore):
                 task.cancel()
             await asyncio.gather(*sends, return_exceptions=True)
             raise
+
+    async def _upload_unsized(
+        self, file_msg: UploadableFileMessage
+    ) -> List[SentFileMessage]:
+        """Upload a stream of unknown length while it is still arriving.
+
+        Telegram has a way for this: parts go out with ``file_total_parts``
+        at ``-1`` and only the last one carries the real count (see
+        ``FileUploader``). Nothing has to be spooled, and the client is read
+        at the pace Telegram takes the parts.
+
+        The size of a document is capped at 2 GB, so a longer stream goes on
+        in the next document, numbered as the next part. The premium
+        account's 4 GB documents are not used: whether it is worth it is
+        only known at the end. A stream that ends exactly at a document's
+        limit does not get an empty document after it.
+
+        Each document is sent in the background as soon as it is complete,
+        while the next one is being read. When anything fails, the parts
+        that were already sent are deleted again.
+        """
+        file_name = file_msg.name or "unnamed"
+        sends: List["asyncio.Task[SentFileMessage]"] = []
+        await file_msg.open()
+        try:
+            while True:
+                part_name = f"[part{file_msg.part_offset + len(sends) + 1}]{file_name}"
+                file_msg.name = part_name
+                uploader = FileUploader(
+                    self.tdlib.next_bot,
+                    file_msg,
+                    max_bytes=PART_SIZE_DEFAULT,
+                    manage_message=False,
+                )
+                uploaded = await uploader.upload()
+                if uploaded == 0:
+                    break
+                logger.info(
+                    f"Uploaded {uploaded} bytes of the stream {part_name} to "
+                    f"channel {self.private_file_channel}."
+                )
+                sends.append(
+                    asyncio.create_task(
+                        self._send_uploaded(uploader, uploaded, part_name)
+                    )
+                )
+                if uploaded < PART_SIZE_DEFAULT:
+                    break
+            return list(await asyncio.gather(*sends))
+        except BaseException:
+            for task in sends:
+                task.cancel()
+            results = await asyncio.gather(*sends, return_exceptions=True)
+            sent = [r for r in results if isinstance(r, SentFileMessage)]
+            if sent:
+                await self.delete_messages([m.message_id for m in sent], force=True)
+            raise
+        finally:
+            file_msg.name = file_name
+            await file_msg.close()
 
     async def replace_document(self, message_id: int, buffer: bytes, name: str) -> int:
         file_msg: FileMessageFromBuffer = FileMessageFromBuffer.new(

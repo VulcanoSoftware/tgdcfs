@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import tempfile
 from dataclasses import dataclass
 from typing import AsyncIterator, Dict, Generator, Iterable, List, Optional, Sequence
 
@@ -11,6 +13,7 @@ from tgdcfs.core.repository.interface import IFileContentRepository
 from tgdcfs.errors import TechnicalError
 from tgdcfs.reqres import (
     FileContent,
+    FileMessageFromSpool,
     SentFileMessage,
     UploadableFileMessage,
     aclose_content,
@@ -25,6 +28,10 @@ logger = logging.getLogger(__name__)
 PART_PREFETCH_CONCURRENCY = 2
 # How much of a write-back upload is taken off the request at a time.
 STAGE_READ_CHUNK = 1024 * 1024
+# How much is taken from an unsized upload at a time, and how much of a
+# waiting segment is kept in memory before it spills to disk.
+SEGMENT_READ_CHUNK = 1024 * 1024
+SEGMENT_MEMORY_BYTES = 8 * 1024 * 1024
 
 
 @dataclass
@@ -101,6 +108,9 @@ class StoreFileContentRepository(IFileContentRepository):
         return self._cache
 
     async def save(self, file_msg: UploadableFileMessage) -> List[SentFileMessage]:
+        if file_msg.unsized:
+            return await self._save_unsized(file_msg)
+
         # Stage the bytes on disk while they stream to the primary, so the
         # mirrors read the version from here instead of from the primary.
         # Not with ``sync: tee``: the mirrors that re-upload take the bytes
@@ -176,6 +186,146 @@ class StoreFileContentRepository(IFileContentRepository):
                 self._cache.release(version_id)
         return res
 
+    async def _save_unsized(
+        self, file_msg: UploadableFileMessage
+    ) -> List[SentFileMessage]:
+        """Store an upload of unknown length.
+
+        A store that streams takes it as it is. For the others it is cut
+        into segments of known size, each uploaded once it is full.
+
+        Neither staging in the cache nor tee-ing to the mirrors can start
+        without the size, so those are left out here: the mirrors copy the
+        finished parts from the primary, which is also what they do when
+        the cache is off.
+        """
+        if self._store.streams_unsized_uploads:
+            # The store can take the stream as it is (Telegram: parts with
+            # an open total), so nothing needs to be cut up or spooled.
+            res = await self._store.upload(file_msg)
+            if not res:
+                raise TechnicalError(
+                    f"Nothing to store for {file_msg.name}: the stream was empty"
+                )
+        else:
+            res = await self._upload_segments(file_msg)
+        if (
+            self._mirror_group
+            and res
+            and (self._inline_mirroring or self._tee_mirroring)
+        ):
+            copies = await self._mirror_group.mirror_parts(
+                [m.message_id for m in res],
+                [m.size for m in res],
+                cache=version_cache_for(
+                    self._cache,
+                    self._cache_scope,
+                    file_msg.version_id,
+                    sum(m.size for m in res),
+                ),
+            )
+            for store_key, mirror_ids in copies.mirrors.items():
+                for sent, mirror_id in zip(res, mirror_ids):
+                    sent.mirrors[store_key] = mirror_id
+            res[0].replicas.update(copies.replicas)
+        return res
+
+    async def _upload_segments(
+        self, file_msg: UploadableFileMessage
+    ) -> List[SentFileMessage]:
+        """Cut the stream into segments and upload each once it is full.
+
+        A segment is a normal upload of a known size, so the store plans
+        and sends it as it always does. While one is on its way the next
+        is being filled, which is what lets the upload keep pace with a
+        client that does not announce a size. At most one segment waits
+        in the spool and one is being sent, so the scratch space is
+        bounded by two segments however large the file is.
+
+        When anything fails the parts that already went out are deleted
+        again (best effort), so a failed upload leaves no orphans behind.
+        """
+        segment_size = file_msg.segment_size
+        if segment_size <= 0:
+            raise TechnicalError("An upload of unknown size needs a segment size")
+
+        sent: List[SentFileMessage] = []
+        uploading: Optional["asyncio.Task[List[SentFileMessage]]"] = None
+        index = 0
+        await file_msg.open()
+        try:
+            while True:
+                spool, size = await self._fill_segment(file_msg, segment_size)
+                if size == 0:
+                    spool.close()
+                    if index == 0:
+                        raise TechnicalError(
+                            f"Nothing to store for {file_msg.name}: the stream was empty"
+                        )
+                    break
+
+                segment = FileMessageFromSpool.new(
+                    spool,
+                    size,
+                    name=file_msg.name,
+                    part_offset=index,
+                    task_tracker=file_msg.task_tracker,
+                )
+                # The numbering of the parts follows what was already sent.
+                index += 1
+                if uploading is not None:
+                    sent.extend(await uploading)
+                    uploading = None
+                uploading = asyncio.create_task(self._store.upload(segment))
+                if size < segment_size:
+                    break
+
+            if uploading is not None:
+                sent.extend(await uploading)
+                uploading = None
+            return sent
+        except BaseException:
+            if uploading is not None:
+                uploading.cancel()
+                results = await asyncio.gather(uploading, return_exceptions=True)
+                if not isinstance(results[0], BaseException):
+                    sent.extend(results[0])
+            await self._discard(sent)
+            raise
+        finally:
+            await file_msg.close()
+
+    async def _fill_segment(
+        self, file_msg: UploadableFileMessage, limit: int
+    ) -> tuple["tempfile.SpooledTemporaryFile[bytes]", int]:
+        spool = tempfile.SpooledTemporaryFile(
+            max_size=min(limit, SEGMENT_MEMORY_BYTES), dir=file_msg.spool_dir
+        )
+        size = 0
+        try:
+            while size < limit:
+                chunk = await file_msg.read(min(SEGMENT_READ_CHUNK, limit - size))
+                if not chunk:
+                    break
+                await asyncio.to_thread(spool.write, chunk)
+                size += len(chunk)
+        except BaseException:
+            spool.close()
+            raise
+        return spool, size
+
+    async def _discard(self, sent: List[SentFileMessage]) -> None:
+        if not sent:
+            return
+        try:
+            # Forced: these parts never belonged to a file, so the
+            # keep-removed-files setting does not apply to them.
+            await self._store.delete_messages([m.message_id for m in sent], force=True)
+        except Exception as ex:  # pragma: no cover - best effort cleanup
+            logger.warning(
+                "Could not delete %d parts of a failed upload: %s", len(sent), ex
+            )
+
     async def stage(
         self, file_msg: UploadableFileMessage, version_id: str
     ) -> Optional[int]:
@@ -187,8 +337,11 @@ class StoreFileContentRepository(IFileContentRepository):
         the stream directly. A disk error while the body is already being
         consumed cannot fall back -- the body is gone -- so it fails the
         write, which is the honest answer.
+
+        An upload of unknown size cannot be staged: there is no size to
+        reserve room for, so it is uploaded as a stream instead.
         """
-        if self._cache is None:
+        if self._cache is None or file_msg.unsized:
             return None
         size = file_msg.get_size()
         writer = self._cache.open_staging(self._cache_scope, version_id, size)

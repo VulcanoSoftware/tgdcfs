@@ -7,6 +7,7 @@ from tgdcfs.config import Config
 from tgdcfs.core import Clients
 
 from .host_key import load_or_create_host_key
+from .pending import PendingUploads
 from .server import (
     TGFSSFTPServer,
     TGFSSSHServer,
@@ -17,8 +18,18 @@ from .server import (
 logger = logging.getLogger(__name__)
 
 
+def create_pending_uploads(config: Config) -> Optional[PendingUploads]:
+    """The registry behind ``sftp.write_behind``, or ``None`` when it is off."""
+    sftp_cfg = config.tgdcfs.sftp
+    if not (sftp_cfg.enabled and sftp_cfg.write_behind):
+        return None
+    return PendingUploads(max_bytes=sftp_cfg.write_behind_max_bytes)
+
+
 async def start_sftp_server(
-    clients: Clients, config: Config
+    clients: Clients,
+    config: Config,
+    pending: Optional[PendingUploads] = None,
 ) -> Optional[asyncssh.SSHAcceptor]:
     """Start the SFTP listener, or return ``None`` when it is switched off.
 
@@ -38,7 +49,7 @@ async def start_sftp_server(
         port=sftp_cfg.port,
         server_factory=make_server_factory(config),
         server_host_keys=[host_key],
-        sftp_factory=make_sftp_factory(clients, config),
+        sftp_factory=make_sftp_factory(clients, config, pending),
         allow_scp=True,
     )
 
@@ -47,7 +58,9 @@ async def start_sftp_server(
 
 
 __all__ = [
+    "PendingUploads",
     "TGFSSFTPServer",
     "TGFSSSHServer",
+    "create_pending_uploads",
     "start_sftp_server",
 ]

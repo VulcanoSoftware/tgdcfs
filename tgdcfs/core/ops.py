@@ -1,7 +1,7 @@
 import datetime
 import os.path
 from contextlib import AbstractAsyncContextManager, nullcontext
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 from tgdcfs.errors import FileOrDirectoryDoesNotExist, InvalidPath
 from tgdcfs.reqres import (
@@ -205,7 +205,7 @@ class Ops:
     ) -> TGFSFileDesc:
         task_tracker = await create_upload_task(
             f"/{self._client.name}{dirname}/{file_msg.name}",
-            file_msg.get_size(),
+            None if file_msg.unsized else file_msg.get_size(),
         )
 
         file_msg.task_tracker = task_tracker
@@ -256,6 +256,35 @@ class Ops:
                 name=basename,
                 stream=stream,
                 size=size,
+            ),
+        )
+
+    async def upload_from_unsized_stream(
+        self,
+        stream: AsyncIterator[bytes],
+        remote: str,
+        segment_size: int,
+        spool_dir: Optional[str] = None,
+    ) -> TGFSFileDesc:
+        """Upload a stream whose length is not known until it ends.
+
+        The stores need a part's size before its first byte, so the stream
+        is cut into segments of ``segment_size`` bytes and each is uploaded
+        as soon as it is full, while the next one is still arriving. The
+        version is stored as the sequence of those parts, which is how
+        every read already maps a range onto parts.
+        """
+        self._validate_path(remote)
+        dirname, basename = os.path.dirname(remote), os.path.basename(remote)
+
+        return await self._upload(
+            dirname,
+            FileMessageFromStream.new(
+                name=basename,
+                stream=stream,
+                size=None,
+                segment_size=segment_size,
+                spool_dir=spool_dir,
             ),
         )
 

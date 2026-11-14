@@ -104,6 +104,97 @@ aborts anything still open rather than closing it.
 `Ops.touch()` is called at open time so the name shows up in a listing
 while the upload is still running, matching the WebDAV `PUT` path.
 
+#### Why it feels like two uploads, and write-behind
+
+The spool makes an upload serial where WebDAV's is pipelined. WebDAV knows
+the size from `Content-Length`, so `Ops.upload_from_stream` runs while the
+body is still arriving. SFTP only learns the size at CLOSE, so the stores
+get the first byte after the client has sent the last one, and the client
+waits for the answer to that CLOSE the whole time. The wait grows with the
+file, and a client with an inactivity timeout gives up and re-uploads.
+
+Clients do not announce the size either (OpenSSH strips it from the
+attributes of OPEN on purpose). There are two ways out, below: upload while
+receiving with Telegram's streamed upload (always on), or change
+who waits: `sftp.write_behind` answers the CLOSE once the spool is complete.
+
+`PendingUploads` (`pending.py`) takes the finished spool and uploads it in a
+background task. Until that is done it is the registry the SFTP layer asks
+first:
+
+* `stat`/listing report the spooled size, and `open` for reading serves
+  from the spool (`SpoolReadHandle`), otherwise the placeholder created at
+  open time -- empty -- would be what a client verifying its upload sees;
+* remove and rename wait for pending uploads of the path (below it, for a
+  folder), otherwise the upload would land after the removal and bring the
+  file back, or write to the old name after the move;
+* two uploads of one path run in the order they were closed;
+* the spool is reference counted between the upload and any read handle, and
+  closed when the last of them lets go;
+* the data held back is capped (`write_behind_max_mb`): `submit` waits for
+  room, which delays the CLOSE and so pushes back on a client that is faster
+  than Telegram. A file larger than the cap is let through when nothing else
+  is pending, so the cap cannot deadlock;
+* `main()` drains the registry after the listener is closed.
+
+#### Streaming without a known size
+
+`write_behind` only moves the wait. The wait can be removed because Telegram
+does allow an upload of unknown length. https://core.telegram.org/api/files
+("Streamed uploads") describes it: `upload.saveBigFilePart` is used for every
+part (even if the stream ends up under 10 MB), `file_total_parts` is `-1` on
+every part but the last, the last part carries `ceil(total / part_size)`, and
+`inputFileBig` is finished with that count. The size of the file is only
+needed for the normal flow, where the total is announced with every part; it
+never was a limit of the API, only of `FileUploader`, which used to compute
+`total_parts` from the size first.
+
+The SFTP server uses it:
+
+* `WriteHandle` tracks the prefix written without holes (`_hwm`). Once a few
+  MB have arrived (`STREAM_START_BYTES`) it starts `Ops.upload_from_unsized_stream`
+  over a stream that grows with the spool (`_growing`) and keeps feeding it as
+  the client writes. Bytes handed to the stream are spoken for: a later write
+  below `_yielded` is refused, anything beyond may still be rewritten, and a
+  hole at the end reads as zeros.
+* `FileMessageFromStream(size=None)` is an *unsized* message: `get_size`
+  raises, `read` is short only at the end of the stream, and the task shows no
+  total.
+* `FileUploader` streams it (`_upload_stream`): parts of one part size go out
+  with `-1`, up to the worker count in parallel, while the stream is read at the
+  pace of the upload. One part is read ahead, so the last part is known to be
+  the last and no empty part is needed; it is sent only after every earlier
+  part is confirmed, with the real count. A document holds at most `max_bytes`
+  (2 GB); the rest of the stream is left unread for the next document.
+* `TelegramStore._upload_unsized` loops over documents, numbering them from
+  `part_offset`, and sends each as soon as it is complete. On any failure the
+  messages already sent are deleted again, forced, because they never belonged
+  to a file.
+* `IStore.streams_unsized_uploads` says whether a store takes such a stream.
+  Telegram does; one that does not (Discord needs every attachment's size
+  first) gets segments of `sftp.stream_segment_mb`:
+  `StoreFileContentRepository._upload_segments` fills a spool per segment, uploads
+  it as a normal part of known size (`FileMessageFromSpool`) and fills the next
+  while that is on its way.
+* Encryption wraps the unsized message and encrypts until the plaintext ends;
+  the ciphertext is what gets cut into documents or segments. Staging in the
+  cache and tee-ing to mirrors need the size and are skipped; the mirrors copy
+  the finished parts afterwards.
+
+Trade-offs: bytes already sent on cannot be rewritten, the document appears in
+the channel only when it is complete, and a stream stays on the big-file calls
+and so skips the cheaper small-file path (hence the start threshold). This has
+been tested against the API as documented and against fakes, not against the
+real Telegram servers.
+
+The cost of `write_behind` is the point where the client is told "done": the data is only in a
+spool, in memory or a temp file, not in a store. A crash loses it; a failure
+is logged and marked failed in the task list, not returned to the client. It
+is therefore opt-in, and `write_ack: cache`, which keeps the bytes on the
+data volume and survives a restart, stays the durable alternative. Only SFTP
+sessions of this process see a pending file; WebDAV sees it once it is
+stored.
+
 ## Lifecycle
 
 `start_sftp_server()` returns `None` when disabled and otherwise an
@@ -121,7 +212,8 @@ clients refuse to connect.
 
 All of these are shared with WebDAV and documented in the README:
 
-* uploads need scratch space the size of the file;
+* uploads need scratch space the size of the file, and take the transfer
+  time twice unless `write_behind` is on (which trades durability, above);
 * no append and no partial update — every write stores a new version;
 * moving between two clients is refused;
 * no symlinks and no real permissions; `setstat` accepts and ignores, since

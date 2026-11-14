@@ -416,6 +416,7 @@ class TestOps:
         mock_file_message = mocker.Mock()
         mock_file_message.name = "test.txt"
         mock_file_message.get_size.return_value = 512
+        mock_file_message.unsized = False
 
         # Mock task tracker
         task_tracker = mock_create_task.return_value
@@ -443,11 +444,37 @@ class TestOps:
         assert result == mock_file_desc
 
     @pytest.mark.asyncio
+    async def test_upload_from_unsized_stream(self, mock_create_task, ops, mocker):
+        mock_parent_dir = mocker.Mock(spec=TGFSDirectory)
+        mock_file_desc = mocker.Mock(spec=TGFSFileDesc)
+        mock_create_task.return_value.mark_completed = mocker.AsyncMock()
+        ops._client.file_api.upload = mocker.AsyncMock(return_value=mock_file_desc)
+        mocker.patch.object(ops, "cd", return_value=mock_parent_dir)
+
+        async def stream():
+            yield b"data"
+
+        result = await ops.upload_from_unsized_stream(
+            stream(), "/remote/big.bin", 1024, "/scratch"
+        )
+
+        # A task without a total: the size is not known until the end.
+        mock_create_task.assert_called_once_with("/test_client/remote/big.bin", None)
+        (directory, file_msg), _ = ops._client.file_api.upload.call_args
+        assert directory is mock_parent_dir
+        assert file_msg.name == "big.bin"
+        assert file_msg.unsized
+        assert file_msg.segment_size == 1024
+        assert file_msg.spool_dir == "/scratch"
+        assert result == mock_file_desc
+
+    @pytest.mark.asyncio
     async def test_upload_failure(self, mock_create_task, ops, mocker):
         mock_parent_dir = mocker.Mock(spec=TGFSDirectory)
         mock_file_message = mocker.Mock()
         mock_file_message.name = "test.txt"
         mock_file_message.get_size.return_value = 512
+        mock_file_message.unsized = False
         upload_error = Exception("Upload failed")
 
         # Mock task tracker

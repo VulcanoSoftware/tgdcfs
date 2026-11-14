@@ -2,8 +2,9 @@ import asyncio
 import os
 from dataclasses import dataclass, field
 from io import IOBase
-from typing import AsyncIterator, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
+from tgdcfs.errors import TechnicalError
 from tgdcfs.tasks.integrations import TaskTracker
 
 
@@ -206,10 +207,25 @@ class UploadableFileMessage(FileMessage):
     # the local cache under the same id the metadata will carry.
     version_id: Optional[str] = field(default=None, kw_only=True)
 
+    # An upload whose total size is not known up front (SFTP never says).
+    # It has no ``get_size``; the content repository cuts it into segments
+    # of ``segment_size`` bytes, each of which has a known size as soon as
+    # it is full, and uploads them as parts of one version while the rest
+    # is still arriving. ``spool_dir`` is where a segment waits meanwhile.
+    unsized: bool = field(default=False, kw_only=True)
+    segment_size: int = field(default=0, kw_only=True)
+    spool_dir: Optional[str] = field(default=None, kw_only=True)
+
+    # Number of parts of this version that precede this message, so the
+    # parts of later segments keep counting instead of starting at 1.
+    part_offset: int = field(default=0, kw_only=True)
+
     def _get_size(self) -> int:
         return 0
 
     def get_size(self) -> int:
+        if self.unsized:
+            raise TechnicalError(f"The size of {self.name} is not known yet")
         return self.size or self._get_size()
 
     async def open(self) -> None:
@@ -310,18 +326,24 @@ class FileMessageFromStream(UploadableFileMessage):
     def new(
         cls,
         stream: FileContent,
-        size: int,
+        size: Optional[int],
         name: str = "unnamed",
+        segment_size: int = 0,
+        spool_dir: Optional[str] = None,
     ) -> "FileMessageFromStream":
+        """``size=None`` is a stream of unknown length, read until it ends."""
         return cls(
             name=name,
             caption="",
             tags=FileTags(),
             stream=stream,
             _offset=0,
-            size=size,
+            size=size or 0,
             task_tracker=None,
             _read_size=0,
+            unsized=size is None,
+            segment_size=segment_size,
+            spool_dir=spool_dir,
         )
 
     async def read(self, length: int) -> bytes:
@@ -331,14 +353,67 @@ class FileMessageFromStream(UploadableFileMessage):
         on every read copies everything still pending, which for a stream
         arriving in small chunks is quadratic in the size of the part.
         """
-        size_to_return = min(length, self.get_size() - self._read_size)
-        while len(self.buffer) < size_to_return:
-            self.buffer.extend(await anext(self.stream))
+        if self.unsized:
+            # Short only at the end of the stream.
+            while len(self.buffer) < length:
+                try:
+                    self.buffer.extend(await anext(self.stream))
+                except StopAsyncIteration:
+                    break
+            size_to_return = min(length, len(self.buffer))
+        else:
+            size_to_return = min(length, self.get_size() - self._read_size)
+            while len(self.buffer) < size_to_return:
+                self.buffer.extend(await anext(self.stream))
 
         res = bytes(self.buffer[:size_to_return])
         del self.buffer[:size_to_return]
         self._read_size += size_to_return
         return res
+
+
+@dataclass
+class FileMessageFromSpool(UploadableFileMessage):
+    """One finished segment of an unsized upload, waiting in a spool file.
+
+    Its size is known, which is the whole point: the stores can plan it
+    like any other file. The spool is closed together with the message.
+    """
+
+    spool: Any = None
+
+    @classmethod
+    def new(
+        cls,
+        spool: Any,
+        size: int,
+        name: str,
+        part_offset: int = 0,
+        task_tracker: Optional[TaskTracker] = None,
+    ) -> "FileMessageFromSpool":
+        return cls(
+            name=name,
+            caption="",
+            tags=FileTags(),
+            spool=spool,
+            _offset=0,
+            size=size,
+            task_tracker=task_tracker,
+            _read_size=0,
+            part_offset=part_offset,
+        )
+
+    def _get_size(self) -> int:
+        return self.size
+
+    async def open(self) -> None:
+        await asyncio.to_thread(self.spool.seek, 0)
+
+    async def read(self, length: int) -> bytes:
+        return await asyncio.to_thread(self.spool.read, length)
+
+    async def close(self) -> None:
+        await asyncio.to_thread(self.spool.close)
 
 
 @dataclass

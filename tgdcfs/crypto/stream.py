@@ -76,10 +76,14 @@ class EncryptingFileMessage(UploadableFileMessage):
         if len(header_bytes) != HEADER_SIZE:
             raise RuntimeError("serialized header has unexpected size")
 
-        plaintext_size = inner.get_size()
-        ciphertext_size = HEADER_SIZE + ciphertext_size_for_plaintext(
-            plaintext_size, header.chunk_size
-        )
+        # An upload of unknown length has no ciphertext size either: the
+        # stream is just encrypted until the plaintext ends, and whatever
+        # cuts it into parts below works on the ciphertext bytes.
+        ciphertext_size = 0
+        if not inner.unsized:
+            ciphertext_size = HEADER_SIZE + ciphertext_size_for_plaintext(
+                inner.get_size(), header.chunk_size
+            )
 
         msg = cls(
             name=inner.name,
@@ -89,6 +93,9 @@ class EncryptingFileMessage(UploadableFileMessage):
             _offset=0,
             _read_size=0,
             task_tracker=inner.task_tracker,
+            unsized=inner.unsized,
+            segment_size=inner.segment_size,
+            spool_dir=inner.spool_dir,
         )
         # Initialize the non-dataclass-init fields after construction.
         msg.inner = inner
@@ -151,11 +158,13 @@ class EncryptingFileMessage(UploadableFileMessage):
         """
         target = self.cipher.chunk_size
         buf = bytearray()
-        remaining_plaintext = self.inner.get_size() - self._plaintext_read
-        if remaining_plaintext <= 0:
-            return b""
-
-        want = min(target, remaining_plaintext)
+        if self.inner.unsized:
+            want = target
+        else:
+            remaining_plaintext = self.inner.get_size() - self._plaintext_read
+            if remaining_plaintext <= 0:
+                return b""
+            want = min(target, remaining_plaintext)
         while len(buf) < want:
             piece = await self.inner.read(want - len(buf))
             if not piece:

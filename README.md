@@ -80,6 +80,11 @@ tgdcfs:
     # authorized_keys_dir: sftp_authorized_keys
     # upload_buffer_size_mb: 64
     # upload_buffer_dir: ''
+    # write_behind: false         # answer an upload once it is buffered
+    # write_behind_max_mb: 2048   # most data held back this way, 0 = no cap
+    # stream_segment_mb: 256      # segment size for stores that cannot stream
+    # stream_window_mb: 0         # how far a client may run ahead of the upload;
+                                  # 0 = automatic (1/8 of the free spool disk, 16-512 MB)
 ```
 
 Both interfaces run in the same process and go through the same core, so
@@ -120,6 +125,63 @@ held in memory up to `upload_buffer_size_mb` (default 64) and spills to
 Plan for that much scratch space when pushing large files. A transfer that
 is cut off mid-flight is discarded rather than committed, so an interrupted
 upload never truncates an existing file.
+
+**Why an SFTP upload feels like two uploads.** WebDAV announces the size of a
+file (`Content-Length`), so the bytes can go to Telegram while they arrive.
+SFTP cannot, so the file is first received in full and only sent on when the
+client closes it -- and the client waits, idle at 100%, for the answer to
+that close. For a large file that wait is as long as the transfer itself, and
+clients with an inactivity timeout (FileZilla: 20 seconds) drop the
+connection and start over. Setting `write_behind: true` answers the close as
+soon as the file is buffered and finishes the upload to Telegram in the
+background:
+
+* `stat`, listings and reads show the new file at once, served from the
+  buffer until the stores have it, so clients that verify an upload
+  (`rclone`, `rsync`) are satisfied;
+* removing or renaming a file (or a folder containing one) waits for its
+  upload to finish, so a deleted file does not come back;
+* `write_behind_max_mb` caps the data held back; a close that would exceed it
+  is answered only once earlier uploads have finished, so a client that is
+  faster than Telegram is slowed down instead of filling the disk. A single
+  file larger than the cap is accepted when nothing else is pending;
+* on shutdown the server finishes the pending uploads first.
+
+The trade-off is durability: a file is only in the stores once its background
+upload is done. A crash or hard restart before that loses it, and a failed
+upload is logged (and shown in the task list) instead of being reported to
+the client. WebDAV does not see a file until it is in the stores. For
+durability across restarts use `write_ack: cache` on the file system, which
+does the same for WebDAV and SFTP with the data on disk. Off by default.
+
+**Uploading while the client is still sending.**
+Telegram has a documented way to upload a file whose length is not known in
+advance ("Streamed uploads" in the [API documentation](https://core.telegram.org/api/files)):
+every part is sent with `file_total_parts = -1` and only the last part says how
+many there were. An SFTP upload always uses it. Once a few
+MB have arrived the file is uploaded to Telegram while the client keeps sending,
+and when the client is done only the end of the file is left, so the second wait
+that made an SFTP upload take twice as long is gone.
+
+* A file stays one document, up to the 2 GB a Telegram message holds (a longer
+  file goes on in the next message, as before).
+* Data that has already been sent on cannot be rewritten: a client that goes
+  back to change earlier bytes of such a large file gets an error. Ordinary
+  uploads (`put`, FileZilla, WinSCP, rclone) write front to back.
+* Files of only a few MB are unaffected and keep the default path (spool,
+  upload on close, or `write_behind` when that is on).
+* Parts that were already uploaded when a transfer fails or is cut off are
+  deleted again.
+* Encryption works as usual. The mirrors copy the finished parts from the
+  primary store afterwards; the local cache does not stage these uploads.
+* A store that cannot take a stream of unknown length (Discord needs every
+  attachment's size first) is given the file in segments of `stream_segment_mb`
+  (default 256, at most 1900) instead: each is uploaded as soon as it is full,
+  and the file is stored as one part per segment.
+* On disk the server holds the file being received, as before.
+
+With streaming on, `close` still waits for the end of the file, so `write_behind`
+has little left to do for large files. Both are off by default.
 
 **Known limits**, all of them shared with the WebDAV interface: files
 cannot be appended to or partially updated (every write stores a new

@@ -56,6 +56,9 @@ class FakeStore(IStore):
     max_text_chars: int = 4096
     server_copy: bool = True
     deleted_on_remove: bool = True
+    # Like the Telegram store: takes a stream of unknown length as it is.
+    streams: bool = False
+    streamed: int = 0  # bytes taken from unsized uploads so far
     fail: Set[str] = field(default_factory=set)
     messages: Dict[int, FakeMessage] = field(default_factory=dict)
     pinned: Optional[int] = None
@@ -64,6 +67,10 @@ class FakeStore(IStore):
 
     def __post_init__(self):
         IStore.__init__(self, self.key)
+
+    @property
+    def streams_unsized_uploads(self) -> bool:
+        return self.streams
 
     # -- helpers -----------------------------------------------------------
 
@@ -120,6 +127,8 @@ class FakeStore(IStore):
 
     async def upload(self, file_msg: UploadableFileMessage) -> List[SentFileMessage]:
         self._check("upload")
+        if file_msg.unsized:
+            return await self._upload_stream(file_msg)
         await file_msg.open()
         size = file_msg.get_size()
         res: List[SentFileMessage] = []
@@ -135,11 +144,45 @@ class FakeStore(IStore):
                 data.extend(chunk)
             part += 1
             mid = self._add(
-                document=bytes(data), name=f"[part{part}]{file_msg.file_name()}"
+                document=bytes(data),
+                name=f"[part{file_msg.part_offset + part}]{file_msg.file_name()}",
             )
             res.append(SentFileMessage(message_id=mid, size=len(data)))
             remaining -= len(data)
             if not data:
+                break
+        await file_msg.close()
+        return res
+
+    async def _upload_stream(
+        self, file_msg: UploadableFileMessage
+    ) -> List[SentFileMessage]:
+        """A stream of unknown length, read to its end in documents of the limit."""
+        assert (
+            self.streams
+        ), "this fake store cannot take an unsized upload"  # noqa: S101
+        await file_msg.open()
+        res: List[SentFileMessage] = []
+        while True:
+            data = bytearray()
+            while len(data) < self.max_part_bytes:
+                # In pieces, like the real uploader: a read of the whole
+                # document would wait for the end of the stream.
+                chunk = await file_msg.read(
+                    min(256 * 1024, self.max_part_bytes - len(data))
+                )
+                if not chunk:
+                    break
+                data.extend(chunk)
+                self.streamed += len(chunk)
+            if not data:
+                break
+            mid = self._add(
+                document=bytes(data),
+                name=f"[part{file_msg.part_offset + len(res) + 1}]{file_msg.file_name()}",
+            )
+            res.append(SentFileMessage(message_id=mid, size=len(data)))
+            if len(data) < self.max_part_bytes:
                 break
         await file_msg.close()
         return res

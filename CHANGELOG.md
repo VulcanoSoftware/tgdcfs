@@ -18,6 +18,46 @@ the fact on the commits that shipped them.
 
 ### Added
 
+- While an SFTP upload streams, bytes already sent to the stores are handed
+  back to the disk (hole punching) and the client's writes wait once it is
+  more than the window ahead of the upload. Before, the whole file stayed in
+  the scratch space, which filled up on large files
+  (`No space left on device`). `tgdcfs.sftp.stream_window_mb` sets the window;
+  the default `0` sizes it automatically as an eighth of the free space of the
+  disk the upload is buffered on, between 16 and 512 MB.
+- A streamed SFTP upload logs when it starts and when it ends (size, time and
+  speed), and an error if it fails.
+- At startup the local cache warns when its disk cannot hold what the config
+  allows (`cache.min_free_mb` larger than the free space, or less room than
+  `max_size_mb`). Before, the only sign was a warning on every read.
+- The config generator has the SFTP upload settings: the upload window
+  (automatic or fixed), the segment size and write-behind.
+
+- SFTP uploads always stream, and `tgdcfs.sftp.stream_segment_mb`
+  (default `256`, at most `1900`). An SFTP upload no longer has to be
+  received in full before it goes to Telegram. Telegram documents an upload
+  of unknown length ("Streamed uploads": `file_total_parts = -1` on every
+  part but the last), and the file is uploaded while the
+  client is still sending, as one document up to 2 GB, so only its end is
+  left to send when the client is done. Stores that need the size first
+  (Discord) get segments of `stream_segment_mb` instead. Bytes that were
+  already sent on cannot be rewritten, small files are unaffected, and
+  failed uploads delete the parts they had already stored. Works with
+  encryption and mirrors. See "Uploading while the client is still sending"
+  in the README.
+- `tgdcfs.sftp.write_behind` (default `false`) and `write_behind_max_mb`
+  (default `2048`, `0` for no cap). An SFTP upload is received in full
+  before it goes to Telegram, because SFTP never announces the file size,
+  and the client waits for the answer to its close in the meantime: the
+  upload takes twice as long as over WebDAV, and clients with an inactivity
+  timeout (FileZilla: 20 seconds) give up and upload again. With
+  `write_behind` the close is answered once the file is buffered and the
+  upload finishes in the background. Stat, listings and reads already show
+  the file, remove and rename wait for its upload, and the data held back is
+  capped. The file is only in the stores once the background upload is
+  done, so a crash before that loses it; see "Uploads are buffered" in the
+  README.
+
 - This changelog, SemVer release tags and GitHub releases. A pushed tag
   `vX.Y.Z` publishes the release notes from this file and adds the version
   tags to the Docker images of that commit.
