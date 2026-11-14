@@ -455,8 +455,9 @@ class TestStreamedUpload:
     The protocol: buffer part_size bytes -- or less when the stream ends --
     and upload immediately, always through upload.saveBigFilePart, with
     ``file_total_parts = -1`` everywhere except the last part, which
-    carries ``ceil(total/part_size)`` and may be empty when the stream ends
-    exactly on a part boundary.
+    carries ``ceil(total/part_size)`` and always holds data: one part is
+    kept back until the next read proves a successor, so a stream ending
+    exactly on a part boundary never sends an empty part.
     """
 
     PART = 512 * 1024
@@ -527,7 +528,7 @@ class TestStreamedUpload:
         assert uploader.get_uploaded_file().parts == 3
 
     @pytest.mark.asyncio
-    async def test_stream_ending_on_a_part_boundary_uploads_an_empty_last_part(
+    async def test_a_stream_ending_on_a_part_boundary_keeps_the_last_part_full(
         self, mock_client
     ):
         content = b"x" * (2 * self.PART)
@@ -540,11 +541,37 @@ class TestStreamedUpload:
         )
         assert await uploader.upload() == len(content)
 
-        assert self.totals(mock_client) == [-1, -1, 2]
+        assert self.totals(mock_client) == [-1, 2]
+        assert [len(req.bytes) for req in self.reqs(mock_client)] == [
+            self.PART,
+            self.PART,
+        ]
         last = self.reqs(mock_client)[-1]
-        assert last.bytes == b""
-        assert last.file_part == 2
+        assert last.bytes == content[self.PART :]
+        assert last.file_part == 1
         assert uploader.get_uploaded_file().parts == 2
+
+    @pytest.mark.asyncio
+    async def test_one_byte_over_a_part_boundary_gets_a_one_byte_last_part(
+        self, mock_client
+    ):
+        content = b"x" * (2 * self.PART + 1)
+
+        uploader = FileUploader(
+            client=mock_client,
+            file_msg=FileMessageFromStream.new(
+                stream=self.stream_of([content]), size=-1
+            ),
+        )
+        assert await uploader.upload() == len(content)
+
+        assert self.totals(mock_client) == [-1, -1, 3]
+        assert [len(req.bytes) for req in self.reqs(mock_client)] == [
+            self.PART,
+            self.PART,
+            1,
+        ]
+        assert uploader.get_uploaded_file().parts == 3
 
     @pytest.mark.asyncio
     async def test_empty_stream_uploads_nothing(self, mock_client):

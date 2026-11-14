@@ -229,11 +229,18 @@ class FileUploader:
         buffer ``part_size`` bytes -- or less when the stream ends -- and
         upload each part immediately, always through
         ``upload.saveBigFilePart``. Every part but the last is saved with
-        ``file_total_parts = -1``; the last one, possibly empty when the
-        stream ends exactly on a part boundary, carries
+        ``file_total_parts = -1``; the last one carries
         ``file_total_parts = ceil(total_stream_size / part_size)`` and is
-        saved only after every other part is in, so the server can finalize
-        the file.
+        saved only after every other part is in, so the server can
+        finalize the file.
+
+        One part is always held back until the next read proves that more
+        data follows, so the stream ending exactly on a part boundary
+        makes the held part the last one instead of sending an empty
+        part: FILE_PART_EMPTY is on Telegram's error list, and the docs
+        do not promise that an empty part finalizes a file. Only a
+        completely empty stream saves nothing, exactly like a known-size
+        empty file.
         """
         queue: asyncio.Queue[Optional[FileChunk]] = asyncio.Queue(
             maxsize=self._num_workers
@@ -282,22 +289,31 @@ class FileUploader:
 
         total = 0
         index = 0
+        held: Optional[bytes] = None
         tail: Optional[bytes] = None
         try:
             while True:
                 if await self._cancelled():
+                    # Nothing more goes to the server after a cancel, not
+                    # even the part held back for the boundary check.
+                    held = None
                     break
                 content = await self._read(self._chunk_size)
                 if not content:
                     break
                 total += len(content)
+                if held is not None:
+                    # The read that just came back proves the held part
+                    # has a successor, so it can go to the workers now.
+                    await feed(FileChunk(content=held, file_part=index))
+                    index += 1
+                    held = None
                 if len(content) < self._chunk_size:
                     # The stream ran dry mid-part: this short part is the
                     # last one and carries the real total.
                     tail = content
                     break
-                await feed(FileChunk(content=content, file_part=index))
-                index += 1
+                held = content
         finally:
             if all(w.done() for w in workers):
                 results = await asyncio.gather(*workers, return_exceptions=True)
@@ -310,20 +326,14 @@ class FileUploader:
         if failed is not None:
             raise failed
 
-        if tail is not None:
+        last = tail if tail is not None else held
+        if last is not None:
             await self._upload_chunk(
-                FileChunk(content=tail, file_part=index), file_total_parts=index + 1
+                FileChunk(content=last, file_part=index), file_total_parts=index + 1
             )
             if tt := self._file_msg.task_tracker:
-                await tt.update_progress(size_delta=len(tail))
+                await tt.update_progress(size_delta=len(last))
             index += 1
-        elif index > 0 and not await self._cancelled():
-            # The stream ended exactly on a part boundary: the protocol
-            # finishes the file with one last empty part carrying the real
-            # total part count.
-            await self._upload_chunk(
-                FileChunk(content=b"", file_part=index), file_total_parts=index
-            )
 
         self._file_size = total
         self._total_parts = index
