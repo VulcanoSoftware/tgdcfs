@@ -10,6 +10,7 @@ gaps included only once they are provably holes.
 
 import asyncio
 import hashlib
+import logging
 import os
 import random
 import resource
@@ -189,6 +190,49 @@ class TestScatteredWrites:
             f"{rss_after:.0f} MiB, staged file {logical / MIB:.1f} MiB "
             f"logical, {on_disk / MIB:.1f} MiB on disk"
         )
+
+
+class TestUploadLogging:
+    async def test_start_and_end_are_logged_with_bytes_and_speed(self, caplog):
+        payload = os.urandom(2 * MIB)
+        ops = CollectingOps()
+        handle = WriteHandle(ops.as_mock(), "/file.bin", buffer_max_bytes=8 * MIB)
+
+        with caplog.at_level(logging.INFO, logger="tgdcfs.app.sftp.handles"):
+            await handle.write(0, payload)
+            await handle.close()
+
+        messages = [r.getMessage() for r in caplog.records]
+        started = [m for m in messages if "started" in m and "/file.bin" in m]
+        finished = [m for m in messages if "finished" in m and "/file.bin" in m]
+        assert len(started) == 1 and len(finished) == 1
+        assert str(len(payload)) in finished[0]
+        assert "MiB/s" in finished[0]
+
+    async def test_a_failure_is_logged_with_the_reason(self, caplog):
+        ops = CollectingOps()
+        mock = ops.as_mock()
+
+        async def refuse(stream, size, remote):
+            async for _ in stream:
+                pass
+            raise TechnicalError("store refused")
+
+        mock.upload_from_stream = refuse
+        handle = WriteHandle(mock, "/file.bin", buffer_max_bytes=8 * MIB)
+
+        with caplog.at_level(logging.INFO, logger="tgdcfs.app.sftp.handles"):
+            await handle.write(0, b"data")
+            with pytest.raises(TechnicalError):
+                await handle.close()
+
+        failed = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelname == "ERROR" and "/file.bin" in r.getMessage()
+        ]
+        assert len(failed) == 1
+        assert "store refused" in failed[0]
 
 
 class TestRewriteAfterStreaming:

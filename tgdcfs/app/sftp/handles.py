@@ -3,12 +3,15 @@ import errno
 import logging
 import os
 import tempfile
+import time
 from typing import AsyncIterator, List, Optional
 
 from tgdcfs.core import Ops
 from tgdcfs.errors import TechnicalError
 
 logger = logging.getLogger(__name__)
+
+MIB = 1024 * 1024
 
 SEEK_DATA = getattr(os, "SEEK_DATA", 3)
 SEEK_HOLE = getattr(os, "SEEK_HOLE", 4)
@@ -396,21 +399,43 @@ class WriteHandle(Handle):
                 f"The upload of {self._path} was started without a queue"
             )
 
+        sent = 0
+        started = time.monotonic()
+
         async def stream() -> AsyncIterator[bytes]:
+            nonlocal sent
             while True:
                 chunk = await queue.get()
                 if chunk is None:
                     return
+                sent += len(chunk)
                 self._queued_bytes -= len(chunk)
                 async with cond:
                     cond.notify_all()
                 yield chunk
 
+        logger.info("Streaming upload of %s started", self._path)
         try:
             await self._ops.upload_from_stream(stream(), -1, self._path)
         except Exception as ex:
             self._error = ex
-            logger.error("Streaming upload of %s failed: %s", self._path, ex)
+            logger.error(
+                "Streaming upload of %s failed after %d bytes in %.1fs: %s",
+                self._path,
+                sent,
+                time.monotonic() - started,
+                ex,
+            )
+        else:
+            elapsed = time.monotonic() - started
+            rate = sent / MIB / elapsed if elapsed > 0 else 0.0
+            logger.info(
+                "Streaming upload of %s finished: %d bytes in %.1fs " "(%.1f MiB/s)",
+                self._path,
+                sent,
+                elapsed,
+                rate,
+            )
         finally:
             async with cond:
                 cond.notify_all()

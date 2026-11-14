@@ -1,9 +1,11 @@
 import logging
+import shutil
+import tempfile
 from typing import Optional
 
 import asyncssh
 
-from tgdcfs.config import Config
+from tgdcfs.config import Config, SFTPConfig
 from tgdcfs.core import Clients
 
 from .host_key import load_or_create_host_key
@@ -15,6 +17,8 @@ from .server import (
 )
 
 logger = logging.getLogger(__name__)
+
+MIB = 1024 * 1024
 
 
 async def start_sftp_server(
@@ -32,6 +36,7 @@ async def start_sftp_server(
         return None
 
     host_key = load_or_create_host_key(sftp_cfg.host_key_file)
+    _warn_when_buffer_disk_is_small(sftp_cfg)
 
     acceptor = await asyncssh.listen(
         host=sftp_cfg.host,
@@ -44,6 +49,22 @@ async def start_sftp_server(
 
     logger.info("Starting SFTP server on %s:%s", sftp_cfg.host, sftp_cfg.port)
     return acceptor
+
+
+def _warn_when_buffer_disk_is_small(sftp_cfg: SFTPConfig) -> None:
+    """Warn when the disk behind ``upload_buffer_dir`` cannot hold what one
+    upload may stage there, so the surprise lands at startup and not in the
+    middle of a transfer."""
+    buffer_dir = sftp_cfg.upload_buffer_dir or tempfile.gettempdir()
+    free = shutil.disk_usage(buffer_dir).free
+    if free < sftp_cfg.max_ahead_gap_bytes:
+        logger.warning(
+            "Only %.0f MiB free on the disk of sftp.upload_buffer_dir (%s); "
+            "a single upload may stage up to %d MiB there before it fails",
+            free / MIB,
+            buffer_dir,
+            sftp_cfg.max_ahead_gap_mb,
+        )
 
 
 __all__ = [
