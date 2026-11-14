@@ -8,6 +8,7 @@ from typing import List, cast
 
 import pytest
 
+from tests.fakes.store import FakeStore
 from tgdcfs.backends.base import IStore
 from tgdcfs.config import CacheConfig
 from tgdcfs.core.api import DirectoryApi, FileApi, FileDescApi, MetaDataApi
@@ -22,8 +23,7 @@ from tgdcfs.core.repository.impl import (
 )
 from tgdcfs.core.tee import TeeBranch, TeeFileMessage
 from tgdcfs.errors import TechnicalError
-from tgdcfs.reqres import FileMessageFromBuffer, Replica
-from tests.fakes.store import FakeStore
+from tgdcfs.reqres import FileMessageFromBuffer, FileMessageFromStream, Replica
 
 pytestmark = pytest.mark.asyncio
 
@@ -125,6 +125,50 @@ class TestTeeFileMessage:
         await msg.open()
         assert await msg.read(5) == b"56789"
         await msg.close()
+        assert await drained == data
+
+    async def test_an_unknown_size_ends_at_the_streams_own_eof(self):
+        """An SFTP upload has no size: the branches end when the inner
+        stream is exhausted, not at a byte count."""
+        data = b"0123456789"
+
+        async def stream():
+            yield data[:4]
+            yield data[4:]
+
+        inner = FileMessageFromStream.new(stream=stream(), size=-1, name="a.bin")
+        branch = TeeBranch("dc", 4096)
+        msg = TeeFileMessage.wrap(inner, [branch])
+        drained = asyncio.ensure_future(drain(branch))
+
+        await msg.open()
+        assert await msg.read(4) == b"0123"
+        await asyncio.sleep(0)
+        assert not drained.done()
+        assert await msg.read(100) == b"456789"
+        assert await msg.read(100) == b""
+        assert await drained == data
+
+    async def test_close_is_still_not_the_end_with_an_unknown_size(self):
+        data = b"0123456789"
+
+        async def stream():
+            yield data
+
+        inner = FileMessageFromStream.new(stream=stream(), size=-1, name="a.bin")
+        branch = TeeBranch("dc", 4096)
+        msg = TeeFileMessage.wrap(inner, [branch])
+        drained = asyncio.ensure_future(drain(branch))
+
+        await msg.open()
+        assert await msg.read(5) == b"01234"
+        await msg.close()
+        await asyncio.sleep(0)
+        assert not drained.done()
+        msg.next_part(5)
+        await msg.open()
+        assert await msg.read(100) == b"56789"
+        assert await msg.read(100) == b""
         assert await drained == data
 
 
@@ -257,6 +301,7 @@ class TestMirrorGroupTee:
         group = make_group(tg, dc)
         tee = group.tee(FileMessageFromBuffer.new(buffer=DATA, name="a.bin"), 16)
         assert tee is not None
+        await tee.message.open()
         await tee.message.read(100)  # the mirror has started
         await asyncio.sleep(0)
 
@@ -265,6 +310,28 @@ class TestMirrorGroupTee:
         outcome = await tee.collect()
         assert all(isinstance(o, Exception) for o in outcome.values())
         assert all(b.detached for b in tee.message.branches)
+
+    async def test_an_unknown_size_is_still_teed(self):
+        tg, dc = telegram_like(), discord_like()
+        group = make_group(tg, dc)
+
+        async def stream():
+            yield DATA[:2000]
+            yield DATA[2000:]
+
+        tee = group.tee(
+            FileMessageFromStream.new(stream=stream(), size=-1, name="a.bin"),
+            1 << 20,
+        )
+        assert tee is not None
+
+        sent = await tg.upload(tee.message)
+        replicas = group.collect_tee(await tee.collect())
+
+        assert sum(m.size for m in sent) == len(DATA)
+        replica = replicas["dc:9"]
+        assert b"".join(dc.document_of(m) for m in replica.message_ids) == DATA
+        assert tg.downloaded == []  # nothing was read back
 
     async def test_two_mirrors_share_one_stream(self):
         tg, a, b = telegram_like(), discord_like("dc:1"), discord_like("dc:2")

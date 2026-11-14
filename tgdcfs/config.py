@@ -247,11 +247,20 @@ class SFTPConfig:
     the usual ``authorized_keys`` format. The user must still exist in
     ``tgdcfs.users`` so the readonly flag keeps applying.
 
-    ``upload_buffer_size_mb`` is how much of an incoming upload is kept in
-    memory before it spills over to ``upload_buffer_dir`` (the system temp
-    directory when empty). SFTP never announces the file size up front
-    while Telegram uploads need it, so a whole file has to be buffered
-    before it can be sent.
+    ``upload_buffer_size_mb`` is how much of an incoming upload may sit
+    ahead of the streamed position in memory before it spills over to
+    ``upload_buffer_dir`` (the system temp directory when empty). Uploads
+    stream straight into Telegram and Discord as the data arrives, so the
+    buffer only absorbs writes that run ahead of the upload; sequential
+    writes never touch it. A write that lands behind bytes already
+    streamed fails the upload rather than store a corrupted file.
+
+    ``max_ahead_gap_mb`` is how far ahead of the streamed position a
+    single write may jump before it is treated as hostile and fails the
+    upload. Within that bound a client may write as far ahead as it
+    likes; the buffer takes it, in memory first and on disk beyond
+    ``upload_buffer_size_mb``. A gap that no write ever covers is
+    zero-filled when the client closes the file.
     """
 
     enabled: bool
@@ -261,14 +270,20 @@ class SFTPConfig:
     authorized_keys_dir: Optional[str]
     upload_buffer_size_mb: int
     upload_buffer_dir: Optional[str]
+    max_ahead_gap_mb: int
 
     DEFAULT_PORT = 2222
     DEFAULT_HOST_KEY_FILE = "sftp_host_key"
     DEFAULT_UPLOAD_BUFFER_SIZE_MB = 64
+    DEFAULT_MAX_AHEAD_GAP_MB = 1024
 
     @property
     def upload_buffer_size_bytes(self) -> int:
         return self.upload_buffer_size_mb * 1024 * 1024
+
+    @property
+    def max_ahead_gap_bytes(self) -> int:
+        return self.max_ahead_gap_mb * 1024 * 1024
 
     @classmethod
     def from_dict(cls, data: Optional[dict]) -> "SFTPConfig":
@@ -284,6 +299,14 @@ class SFTPConfig:
         if buffer_size_mb < 0:
             raise ValueError(
                 f"sftp.upload_buffer_size_mb must not be negative, got {buffer_size_mb}"
+            )
+
+        max_ahead_gap_mb = int(
+            data.get("max_ahead_gap_mb", cls.DEFAULT_MAX_AHEAD_GAP_MB)
+        )
+        if max_ahead_gap_mb <= 0:
+            raise ValueError(
+                f"sftp.max_ahead_gap_mb must be positive, got {max_ahead_gap_mb}"
             )
 
         return cls(
@@ -304,6 +327,7 @@ class SFTPConfig:
                 if data.get("upload_buffer_dir")
                 else None
             ),
+            max_ahead_gap_mb=max_ahead_gap_mb,
         )
 
 

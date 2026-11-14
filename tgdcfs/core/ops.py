@@ -134,7 +134,7 @@ class Ops:
         self._validate_path(path)
         return await self._client.file_api.set_last_modified(self.stat_file(path), when)
 
-    async def touch(self, path: str) -> None:
+    async def touch(self, path: str, defer_file_ref: bool = False) -> None:
         self._validate_path(path)
         dirname, basename = os.path.dirname(path), os.path.basename(path)
 
@@ -143,7 +143,11 @@ class Ops:
         try:
             d.find_file(basename)
         except FileOrDirectoryDoesNotExist:
-            await self._client.file_api.upload(d, FileMessageEmpty.new(name=basename))
+            await self._client.file_api.upload(
+                d,
+                FileMessageEmpty.new(name=basename),
+                defer_file_ref=defer_file_ref,
+            )
 
     async def mv_dir(self, path_from: str, path_to: str) -> TGFSDirectory:
         self._validate_path(path_from)
@@ -203,9 +207,10 @@ class Ops:
     async def _upload(
         self, dirname: str, file_msg: UploadableFileMessage
     ) -> TGFSFileDesc:
+        size = file_msg.get_size()
         task_tracker = await create_upload_task(
             f"/{self._client.name}{dirname}/{file_msg.name}",
-            file_msg.get_size(),
+            size if size >= 0 else None,
         )
 
         file_msg.task_tracker = task_tracker
@@ -247,6 +252,13 @@ class Ops:
     async def upload_from_stream(
         self, stream: AsyncIterator[bytes], size: int, remote: str
     ) -> TGFSFileDesc:
+        """Upload ``stream`` as ``remote``.
+
+        ``size`` may be ``-1`` when the length is unknown -- a live SFTP
+        write, say. Stores that must know it up front fall back on their
+        own; the stores that stream (Telegram, Discord) take the bytes as
+        they come and the real size is recorded once the stream ends.
+        """
         self._validate_path(remote)
         dirname, basename = os.path.dirname(remote), os.path.basename(remote)
 

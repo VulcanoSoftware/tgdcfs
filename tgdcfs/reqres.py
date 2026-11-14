@@ -310,9 +310,16 @@ class FileMessageFromStream(UploadableFileMessage):
     def new(
         cls,
         stream: FileContent,
-        size: int,
+        size: int = -1,
         name: str = "unnamed",
     ) -> "FileMessageFromStream":
+        """Wrap a stream of ``size`` bytes, or of unknown length (``-1``).
+
+        An unknown length is what a live upload looks like -- SFTP never
+        announces one -- and is allowed anywhere a size is: the stores that
+        cannot stream fall back on their own, and the total is recorded on
+        this message once the stream ends.
+        """
         return cls(
             name=name,
             caption="",
@@ -330,14 +337,29 @@ class FileMessageFromStream(UploadableFileMessage):
         Kept in one buffer rather than a list of chunks: rejoining the list
         on every read copies everything still pending, which for a stream
         arriving in small chunks is quadratic in the size of the part.
-        """
-        size_to_return = min(length, self.get_size() - self._read_size)
-        while len(self.buffer) < size_to_return:
-            self.buffer.extend(await anext(self.stream))
 
-        res = bytes(self.buffer[:size_to_return])
-        del self.buffer[:size_to_return]
-        self._read_size += size_to_return
+        With a known size the read waits for exactly ``length`` bytes (or
+        what is left of the stream); with an unknown one it returns as soon
+        as ``length`` bytes have arrived or the stream ended, and records
+        the total then.
+        """
+        if self.size >= 0:
+            size_to_return = min(length, self.get_size() - self._read_size)
+        else:
+            size_to_return = length
+
+        while len(self.buffer) < size_to_return:
+            try:
+                self.buffer.extend(await anext(self.stream))
+            except StopAsyncIteration:
+                if self.size < 0:
+                    self.size = self._read_size + len(self.buffer)
+                break
+
+        take = min(size_to_return, len(self.buffer))
+        res = bytes(self.buffer[:take])
+        del self.buffer[:take]
+        self._read_size += take
         return res
 
 

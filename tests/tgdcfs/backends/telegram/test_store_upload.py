@@ -407,3 +407,103 @@ class TestReplaceDocument:
         await store.replace_document(12345, b"test data", "test.bin")
 
         mock_from_buffer.assert_called_once_with(buffer=b"test data", name="test.bin")
+
+
+class StreamedMockFileMessage(MockFileMessage):
+    """A source of unknown length that yields ``total`` bytes and ends."""
+
+    def __init__(self, name: str, total: int):
+        super().__init__(name, -1)
+        self.total = total
+        self.consumed = 0
+
+    async def read(self, size: int) -> bytes:
+        take = max(0, min(size, self.total - self.consumed))
+        self.consumed += take
+        return b"x" * take
+
+
+async def drain(msg) -> int:
+    """Consume an upload message the way a real uploader does."""
+    total = 0
+    while chunk := await msg.read(1024 * 1024):
+        total += len(chunk)
+    return total
+
+
+class TestStreamedUpload:
+    """Uploads whose size is unknown until the source runs dry."""
+
+    async def test_unknown_size_is_streamed_part_by_part(
+        self, store, mock_uploader, mocker
+    ):
+        uploader_cls = mocker.patch(
+            "tgdcfs.backends.telegram.store.FileUploader", return_value=mock_uploader
+        )
+        file_msg = StreamedMockFileMessage("live.bin", 15)
+
+        result = await store.upload(file_msg)
+
+        assert len(result) == 1
+        assert result[0].message_id == 12345
+        # The uploader got a stream of unknown length, not a spooled file.
+        part_msg = uploader_cls.call_args[0][1]
+        assert part_msg.size == -1
+        assert part_msg.name == "[part1]live.bin"
+
+    async def test_a_full_part_is_followed_by_another_one(
+        self, store, mock_uploader, mocker
+    ):
+        from tgdcfs.backends.telegram.store import STREAM_PART_SIZE
+
+        def build(api, msg):
+            async def upload():
+                return await drain(msg)
+
+            mock_uploader.upload = mocker.AsyncMock(side_effect=upload)
+            return mock_uploader
+
+        uploader_cls = mocker.patch(
+            "tgdcfs.backends.telegram.store.FileUploader", side_effect=build
+        )
+        file_msg = StreamedMockFileMessage("big.bin", STREAM_PART_SIZE + 5)
+
+        result = await store.upload(file_msg)
+
+        assert len(result) == 2
+        names = [call.args[1].name for call in uploader_cls.call_args_list]
+        assert names == ["[part1]big.bin", "[part2]big.bin"]
+
+    async def test_a_part_that_fills_the_limit_exactly_grows_no_empty_successor(
+        self, store, mock_uploader, mocker
+    ):
+        from tgdcfs.backends.telegram.store import STREAM_PART_SIZE
+
+        def build(api, msg):
+            async def upload():
+                return await drain(msg)
+
+            mock_uploader.upload = mocker.AsyncMock(side_effect=upload)
+            return mock_uploader
+
+        uploader_cls = mocker.patch(
+            "tgdcfs.backends.telegram.store.FileUploader", side_effect=build
+        )
+        file_msg = StreamedMockFileMessage("exact.bin", STREAM_PART_SIZE)
+
+        result = await store.upload(file_msg)
+
+        assert len(result) == 1
+
+    async def test_unknown_size_stays_on_the_bots(
+        self, mock_tdlib, mock_uploader, mocker
+    ):
+        mock_tdlib.account = mocker.AsyncMock()
+        store = TelegramStore(mock_tdlib, 1, premium_upload=True)
+        uploader_cls = mocker.patch(
+            "tgdcfs.backends.telegram.store.FileUploader", return_value=mock_uploader
+        )
+
+        await store.upload(StreamedMockFileMessage("live.bin", 4))
+
+        assert uploader_cls.call_args[0][0] is mock_tdlib.next_bot

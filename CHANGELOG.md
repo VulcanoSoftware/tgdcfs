@@ -42,6 +42,22 @@ the fact on the commits that shipped them.
 
 ### Changed
 
+- SFTP uploads stream into Telegram and Discord as the data arrives instead
+  of being buffered whole first. SFTP does not announce the file size up
+  front, so the Telegram store now uses the streamed-upload protocol
+  (`upload.saveBigFilePart` with `file_total_parts = -1` per part, the real
+  total only on the last part), and large files are sent as ≤ 2 GB document
+  parts by the bot without needing a premium account. Writes that run ahead
+  of the upload are staged in a spooled buffer: in memory up to
+  `upload_buffer_size_mb`, on disk in `upload_buffer_dir` beyond that, so
+  strongly interleaved clients (sshfs, rclone with many requests in
+  flight) work whatever order their writes arrive in. The upload only
+  moves through a staged region once it is contiguous, and a gap no write
+  ever covers is zero-filled on close. A write that lands behind bytes
+  already streamed fails the upload rather than store a corrupted file,
+  and a jump further ahead than the new `sftp.max_ahead_gap_mb` (default
+  1024 MiB) is rejected.
+
 - WebDAV listings report a file's creation date as the date of its oldest
   version. It used to be the time of the listing.
 
@@ -51,6 +67,31 @@ the fact on the commits that shipped them.
 
 ### Fixed
 
+- A file deleted or renamed while its deferred file-reference create was
+  still retrying could reappear after a restart: the retry re-created the
+  blob the delete had just removed. All file-reference blob writes of a
+  repo are serialised now, and a deferred create that finds its reference
+  gone from the tree stops instead of writing. A 422 answer after an
+  earlier attempt (whose response was lost) is also accepted as "the blob
+  landed" without matching GitHub's message text.
+- An SFTP upload no longer fails with "Connection timed out after 20
+  seconds of inactivity" when GitHub is slow or briefly unavailable. The
+  file reference that reserves the name at open was written to the GitHub
+  metadata repo synchronously: a GitHub hiccup (a run of 500 errors) kept
+  the open -- and with it the whole transfer -- waiting for over 20 s, and
+  FileZilla gave up. The reservation is still made right away, but the
+  blob write now runs in the background and retries for about ten minutes
+  before the reference is given up on; the upload itself only talks to
+  Telegram and Discord.
+- A background file reference write whose HTTP response got lost no longer
+  drops the file from the live listing: GitHub's 422 "sha wasn't supplied"
+  answer means the blob already landed, and is now accepted as success on
+  every retry instead of only within one attempt.
+- With `sync: tee`, streamed uploads of unknown size (SFTP) now feed the
+  re-uploading mirrors from the stream too. The tee refused a stream
+  without a size, so with a Discord mirror nothing at all arrived there
+  until a later background pass; the branches now end at the stream's
+  own EOF instead of at a byte count.
 - An upload that fails or is cut off (client timeout, reset connection) no
   longer leaves the empty file behind that the PUT creates first. FileZilla
   listed it as an existing 0 B file and asked "Target file already exists" on

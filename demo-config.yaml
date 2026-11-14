@@ -113,10 +113,18 @@ tgdcfs:
   # one file <dir>/<username> per user, in the usual authorized_keys format.
   # The user must still be listed under `users` so the readonly flag applies.
   #
-  # `upload_buffer_size_mb` (default 64) is how much of an incoming upload is
-  # held in memory before it spills to `upload_buffer_dir` (system temp when
-  # empty). SFTP does not announce the file size up front while Telegram
-  # uploads need it, so a whole file has to be buffered before it is sent.
+  # `upload_buffer_size_mb` (default 64) is how much of an incoming upload
+  # may sit ahead of the streamed position in memory before it spills to
+  # `upload_buffer_dir` (system temp when empty). Uploads stream straight
+  # into Telegram and Discord as the data arrives; the buffer only absorbs
+  # writes that run ahead of the upload.
+  #
+  # `max_ahead_gap_mb` (default 1024) is how far ahead of the streamed
+  # position a single write may jump before the upload fails. Within that
+  # bound writes may arrive in any order; the gap between the streamed
+  # position and a far-ahead write waits for the write that fills it, and
+  # a gap that never gets filled is zero-filled when the client closes the
+  # file.
   # ---------------------------------------------------------------------------
   sftp:
     enabled: false
@@ -126,6 +134,7 @@ tgdcfs:
     # authorized_keys_dir: sftp_authorized_keys
     # upload_buffer_size_mb: 64
     # upload_buffer_dir: ''
+    # max_ahead_gap_mb: 1024
   # ---------------------------------------------------------------------------
   # Optional transfer tuning.
   #

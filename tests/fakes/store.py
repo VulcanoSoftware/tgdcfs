@@ -125,21 +125,27 @@ class FakeStore(IStore):
         res: List[SentFileMessage] = []
         remaining = size
         part = 0
-        while remaining > 0 or not res:
-            part_size = min(self.max_part_bytes, remaining)
+        while True:
+            part_size = (
+                min(self.max_part_bytes, remaining)
+                if remaining >= 0
+                else self.max_part_bytes
+            )
             data = bytearray()
             while len(data) < part_size:
                 chunk = await file_msg.read(part_size - len(data))
                 if not chunk:
                     break
                 data.extend(chunk)
+            if size < 0 and not data and res:
+                break
             part += 1
             mid = self._add(
                 document=bytes(data), name=f"[part{part}]{file_msg.file_name()}"
             )
             res.append(SentFileMessage(message_id=mid, size=len(data)))
             remaining -= len(data)
-            if not data:
+            if not data or (size >= 0 and remaining <= 0):
                 break
         await file_msg.close()
         return res

@@ -375,6 +375,17 @@ class TGFSDirectory:
     ) -> TGFSFileRef:
         return self.create_file_ref(name, file_message_id)
 
+    async def create_file_ref_deferred(
+        self, name: str, file_message_id: int
+    ) -> TGFSFileRef:
+        """Create the reference now and persist it in the background.
+
+        For callers that must not wait on a slow remote store -- an SFTP
+        open, whose client gives up after 20 s of silence. The base
+        implementation has nothing to defer.
+        """
+        return await self.create_file_ref_async(name, file_message_id)
+
     async def delete_file_ref_async(self, fr: TGFSFileRef) -> None:
         self.delete_file_ref(fr)
 

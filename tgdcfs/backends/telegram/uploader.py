@@ -62,17 +62,29 @@ class FileUploader:
         # 128 KiB below 100 MB, which quadruples the number of requests for
         # no gain -- 512 KiB is accepted for any size.
         self._chunk_size = get_config().tgdcfs.transfer.upload_part_size_bytes
-        self._total_parts = (self._file_size + self._chunk_size - 1) // self._chunk_size
+
+        # A negative size means a live stream of unknown length; the total
+        # only becomes known when the source runs dry. Those uploads follow
+        # the streamed upload protocol (see ``_upload_streamed``).
+        self._streamed = self._file_size < 0
+        if self._streamed:
+            self._total_parts = 0
+        else:
+            self._total_parts = (
+                self._file_size + self._chunk_size - 1
+            ) // self._chunk_size
 
         self._part_indexes: asyncio.Queue[int] = asyncio.Queue(
-            maxsize=self._total_parts
+            maxsize=max(self._total_parts, 1)
         )
 
         self._workers = workers or WorkersConfig.from_config()
 
         self._file_id = generate_random_long()
 
-        self._is_big = is_big_file(self._file_size)
+        # Streamed uploads always go through saveBigFilePart, even when the
+        # stream turns out to be smaller than 10 MB (core.telegram.org/api/files).
+        self._is_big = self._streamed or is_big_file(self._file_size)
         self._read_size = 0
         self._uploaded_size = 0
 
@@ -85,7 +97,9 @@ class FileUploader:
     async def _read(self, length: int) -> bytes:
         return await self._file_msg.read(length)
 
-    async def _upload_chunk(self, chunk: FileChunk) -> None:
+    async def _upload_chunk(
+        self, chunk: FileChunk, file_total_parts: Optional[int] = None
+    ) -> None:
         for attempt in range(1, MAX_PART_ATTEMPTS + 1):
             try:
                 if self._is_big:
@@ -94,7 +108,11 @@ class FileUploader:
                             file_id=self._file_id,
                             bytes=chunk.content,
                             file_part=chunk.file_part,
-                            file_total_parts=self._total_parts,
+                            file_total_parts=(
+                                self._total_parts
+                                if file_total_parts is None
+                                else file_total_parts
+                            ),
                         )
                     )
                 else:
@@ -154,6 +172,11 @@ class FileUploader:
     async def upload(self) -> int:
         await self._file_msg.open()
 
+        if self._streamed:
+            size = await self._upload_streamed()
+            await self._close()
+            return size
+
         for i in range(self._total_parts):
             await self._part_indexes.put(i)
 
@@ -197,6 +220,127 @@ class FileUploader:
 
         await self._close()
         return self._file_size
+
+    async def _upload_streamed(self) -> int:
+        """Upload a stream whose length is unknown until it ends.
+
+        This follows the streamed upload protocol from the official API
+        documentation (core.telegram.org/api/files, "Streamed uploads"):
+        buffer ``part_size`` bytes -- or less when the stream ends -- and
+        upload each part immediately, always through
+        ``upload.saveBigFilePart``. Every part but the last is saved with
+        ``file_total_parts = -1``; the last one carries
+        ``file_total_parts = ceil(total_stream_size / part_size)`` and is
+        saved only after every other part is in, so the server can
+        finalize the file.
+
+        One part is always held back until the next read proves that more
+        data follows, so the stream ending exactly on a part boundary
+        makes the held part the last one instead of sending an empty
+        part: FILE_PART_EMPTY is on Telegram's error list, and the docs
+        do not promise that an empty part finalizes a file. Only a
+        completely empty stream saves nothing, exactly like a known-size
+        empty file.
+        """
+        queue: asyncio.Queue[Optional[FileChunk]] = asyncio.Queue(
+            maxsize=self._num_workers
+        )
+        worker_failed = asyncio.Event()
+
+        async def worker() -> None:
+            try:
+                while True:
+                    if await self._cancelled():
+                        logger.warning(
+                            f"Task uploading for {self._file_name} was cancelled. "
+                            f"Streamed worker exiting."
+                        )
+                        return
+                    chunk = await queue.get()
+                    if chunk is None:
+                        return
+                    await self._upload_chunk(chunk, file_total_parts=-1)
+                    if tt := self._file_msg.task_tracker:
+                        await tt.update_progress(size_delta=len(chunk.content))
+            except Exception:
+                worker_failed.set()
+                raise
+
+        workers = [
+            asyncio.create_task(worker(), name=f"streamed-upload-{self._file_name}")
+            for _ in range(self._num_workers)
+        ]
+
+        async def feed(chunk: FileChunk) -> None:
+            # A full queue waits for a worker to take from it; workers that
+            # all stopped (cancelled or failed) never will, so bail out
+            # instead of blocking on the queue forever.
+            while True:
+                try:
+                    queue.put_nowait(chunk)
+                    return
+                except asyncio.QueueFull:
+                    if worker_failed.is_set() or all(w.done() for w in workers):
+                        raise TechnicalError(
+                            f"Upload of {self._file_name} stopped before the "
+                            f"stream was consumed"
+                        )
+                    await asyncio.sleep(0.05)
+
+        total = 0
+        index = 0
+        held: Optional[bytes] = None
+        tail: Optional[bytes] = None
+        try:
+            while True:
+                if await self._cancelled():
+                    # Nothing more goes to the server after a cancel, not
+                    # even the part held back for the boundary check.
+                    held = None
+                    break
+                content = await self._read(self._chunk_size)
+                if not content:
+                    break
+                total += len(content)
+                if held is not None:
+                    # The read that just came back proves the held part
+                    # has a successor, so it can go to the workers now.
+                    await feed(FileChunk(content=held, file_part=index))
+                    index += 1
+                    held = None
+                if len(content) < self._chunk_size:
+                    # The stream ran dry mid-part: this short part is the
+                    # last one and carries the real total.
+                    tail = content
+                    break
+                held = content
+        finally:
+            if all(w.done() for w in workers):
+                results = await asyncio.gather(*workers, return_exceptions=True)
+            else:
+                for _ in workers:
+                    await queue.put(None)
+                results = await asyncio.gather(*workers, return_exceptions=True)
+
+        failed = next((r for r in results if isinstance(r, Exception)), None)
+        if failed is not None:
+            raise failed
+
+        last = tail if tail is not None else held
+        if last is not None:
+            await self._upload_chunk(
+                FileChunk(content=last, file_part=index), file_total_parts=index + 1
+            )
+            if tt := self._file_msg.task_tracker:
+                await tt.update_progress(size_delta=len(last))
+            index += 1
+
+        self._file_size = total
+        self._total_parts = index
+        # Nothing was saved for an empty stream, so the send must use the
+        # small-file constructor, exactly as a known-size empty file does.
+        self._is_big = total > 0
+        return total
 
     def get_uploaded_file(self) -> UploadedFile:
         return UploadedFile(

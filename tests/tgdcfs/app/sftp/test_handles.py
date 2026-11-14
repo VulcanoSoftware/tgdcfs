@@ -1,7 +1,9 @@
+import asyncio
 import errno
 import os
 
 import pytest
+
 from tgdcfs.app.sftp.handles import (
     SEEK_DATA,
     SEEK_FORWARD_THRESHOLD,
@@ -10,6 +12,7 @@ from tgdcfs.app.sftp.handles import (
     WriteHandle,
 )
 from tgdcfs.core import Ops
+from tgdcfs.errors import TechnicalError
 
 CONTENT = bytes(range(256)) * 64  # 16 KiB of easily verifiable data
 
@@ -127,14 +130,16 @@ class TestWriteHandle:
 
         async def upload_from_stream(stream, size, remote):
             data = b"".join([chunk async for chunk in stream])
-            assert len(data) == size
+            assert size == -1 or len(data) == size
             ops.uploaded[remote] = data
+            ops.upload_sizes = getattr(ops, "upload_sizes", {})
+            ops.upload_sizes[remote] = size
 
         ops.upload_from_stream = mocker.AsyncMock(side_effect=upload_from_stream)
         return ops
 
     async def test_sequential_writes_are_uploaded_in_order(self, ops):
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
         await handle.write(0, b"hello ")
         await handle.write(6, b"world")
         await handle.close()
@@ -142,7 +147,7 @@ class TestWriteHandle:
         assert ops.uploaded == {"/file.bin": b"hello world"}
 
     async def test_out_of_order_writes_land_at_their_offset(self, ops):
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
         await handle.write(6, b"world")
         await handle.write(0, b"hello ")
         await handle.close()
@@ -150,7 +155,7 @@ class TestWriteHandle:
         assert ops.uploaded["/file.bin"] == b"hello world"
 
     async def test_sparse_writes_are_zero_filled(self, ops):
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
         await handle.write(4, b"tail")
         await handle.close()
 
@@ -158,27 +163,27 @@ class TestWriteHandle:
 
     async def test_payload_larger_than_the_spool_is_uploaded_intact(self, ops):
         payload = bytes(range(256)) * 512  # 128 KiB, well past the spool limit
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
         await handle.write(0, payload)
         await handle.close()
 
         assert ops.uploaded["/file.bin"] == payload
 
     async def test_close_without_any_write_uploads_nothing(self, ops):
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
         await handle.close()
 
         ops.upload_from_stream.assert_not_awaited()
 
     async def test_abort_uploads_nothing(self, ops):
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
         await handle.write(0, b"partial")
         await handle.abort()
 
         ops.upload_from_stream.assert_not_awaited()
 
     async def test_close_after_abort_does_not_upload(self, ops):
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
         await handle.write(0, b"partial")
         await handle.abort()
         await handle.close()
@@ -186,8 +191,80 @@ class TestWriteHandle:
         ops.upload_from_stream.assert_not_awaited()
 
     async def test_write_after_close_is_rejected(self, ops):
-        handle = WriteHandle(ops, "/file.bin", spool_max_bytes=1024)
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
         await handle.close()
 
         with pytest.raises(ValueError):
             await handle.write(0, b"late")
+
+    async def test_sequential_writes_stream_with_unknown_size(self, ops):
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
+        await handle.write(0, b"hello ")
+        await handle.write(6, b"world")
+        await handle.close()
+
+        assert ops.upload_sizes == {"/file.bin": -1}
+
+    async def test_upload_runs_while_the_client_is_still_writing(self, ops, mocker):
+        # The store sees the first write before the client is done.
+        seen = []
+
+        async def upload_from_stream(stream, size, remote):
+            async for chunk in stream:
+                seen.append(chunk)
+
+        ops.upload_from_stream = mocker.AsyncMock(side_effect=upload_from_stream)
+
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
+        await handle.write(0, b"first")
+        await asyncio.sleep(0.05)
+        assert seen == [b"first"]
+
+        await handle.write(5, b"second")
+        await handle.close()
+        assert b"".join(seen) == b"firstsecond"
+
+    async def test_a_write_beyond_the_max_gap_fails_the_upload(self, ops):
+        handle = WriteHandle(
+            ops, "/file.bin", buffer_max_bytes=1024, max_gap_bytes=1024
+        )
+        await handle.write(0, b"start")
+
+        with pytest.raises(Exception):
+            await handle.write(2048, b"far ahead")
+
+    async def test_write_behind_streamed_bytes_fails(self, ops):
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
+        await handle.write(0, b"already streamed")
+
+        with pytest.raises(Exception):
+            await handle.write(2, b"backwards")
+
+    async def test_a_rewrite_of_staged_bytes_lands_before_anything_streams(self, ops):
+        # Nothing has been streamed yet, so the second write may still
+        # overwrite the staged bytes in place.
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
+        await handle.write(6, b"world")
+        await handle.write(6, b"WORLD")
+        await handle.write(0, b"hello ")
+        await handle.close()
+
+        assert ops.uploaded["/file.bin"] == b"hello WORLD"
+
+    async def test_upload_failure_fails_the_writes(self, ops, mocker):
+        async def upload_from_stream(stream, size, remote):
+            async for _ in stream:
+                break
+            await stream.aclose()
+            raise TechnicalError("store is down")
+
+        ops.upload_from_stream = mocker.AsyncMock(side_effect=upload_from_stream)
+
+        handle = WriteHandle(ops, "/file.bin", buffer_max_bytes=1024)
+        await handle.write(0, b"data")
+        await asyncio.sleep(0.05)
+
+        with pytest.raises(TechnicalError):
+            await handle.write(4, b"more")
+        with pytest.raises(TechnicalError):
+            await handle.close()

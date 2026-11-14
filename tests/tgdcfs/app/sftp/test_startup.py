@@ -1,5 +1,6 @@
 import os
 import stat
+from unittest.mock import Mock
 
 import asyncssh
 import pytest
@@ -24,6 +25,7 @@ def ephemeral_config(tmp_path) -> SFTPConfig:
         authorized_keys_dir=None,
         upload_buffer_size_mb=1,
         upload_buffer_dir=None,
+        max_ahead_gap_mb=1024,
     )
 
 
@@ -91,6 +93,58 @@ class TestStartSftpServer:
         finally:
             first.close()
             await first.wait_closed()
+
+
+class TestBufferDiskWarning:
+    async def test_a_small_disk_is_warned_about_at_startup(
+        self, mocker, tmp_path, caplog
+    ):
+        cfg = ephemeral_config(tmp_path)
+        cfg.upload_buffer_dir = str(tmp_path / "buffer")
+        cfg.max_ahead_gap_mb = 1024
+        mocker.patch(
+            "tgdcfs.app.sftp.shutil.disk_usage",
+            return_value=Mock(free=512 * 1024 * 1024),
+        )
+        config = build_config(mocker, cfg)
+
+        acceptor = await start_sftp_server({}, config)
+        assert acceptor is not None
+        try:
+            warnings = [
+                r
+                for r in caplog.records
+                if r.levelname == "WARNING" and "buffer" in r.getMessage()
+            ]
+            assert len(warnings) == 1
+            assert "512" in warnings[0].getMessage()
+            assert "1024" in warnings[0].getMessage()
+        finally:
+            acceptor.close()
+            await acceptor.wait_closed()
+
+    async def test_a_big_enough_disk_is_not_warned_about(
+        self, mocker, tmp_path, caplog
+    ):
+        cfg = ephemeral_config(tmp_path)
+        cfg.upload_buffer_dir = str(tmp_path / "buffer")
+        mocker.patch(
+            "tgdcfs.app.sftp.shutil.disk_usage",
+            return_value=Mock(free=10 * 1024 * 1024 * 1024),
+        )
+        config = build_config(mocker, cfg)
+
+        acceptor = await start_sftp_server({}, config)
+        assert acceptor is not None
+        try:
+            assert not [
+                r
+                for r in caplog.records
+                if r.levelname == "WARNING" and "buffer" in r.getMessage()
+            ]
+        finally:
+            acceptor.close()
+            await acceptor.wait_closed()
 
 
 class TestHostKeyPathResolution:

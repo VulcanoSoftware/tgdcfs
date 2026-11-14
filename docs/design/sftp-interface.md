@@ -91,18 +91,39 @@ client fail outright — which is exactly what the integration test caught.
 ### Writes: a size that is not known in advance
 
 Telegram uploads need the total size up front (it decides the part layout);
-SFTP never sends it. So `WriteHandle` spools the payload — in memory up to
-`upload_buffer_size_mb`, on disk beyond that, via `SpooledTemporaryFile` —
-and only on `close()` streams it into `Ops.upload_from_stream` with the
-size now known.
+SFTP never sends it. `WriteHandle` therefore streams sequential writes
+straight into `Ops.upload_from_stream` with size `-1`: the stores use the
+Telegram streamed-upload protocol (`upload.saveBigFilePart` with
+`file_total_parts = -1`, the real total only on the last part), so bytes
+travel while the client is still writing. The Discord store already takes
+an unknown size.
 
-Buffering is not just a workaround for the missing size: it also makes
-out-of-order and sparse writes work, since the spool is seekable, and it
-keeps a dropped connection from committing a truncated file — `exit()`
-aborts anything still open rather than closing it.
+Writes that run ahead of the streamed position -- pipelined clients such
+as sshfs or rclone keep many requests in flight -- are staged in a spooled
+buffer: in memory up to `upload_buffer_size_mb`, on disk in
+`upload_buffer_dir` beyond that. The upload only moves through a staged
+region once it is contiguous from the streamed position, so the stores
+always see the file in byte order and a gap waits for the write that
+belongs there; a gap no write ever covers is zero-filled on close. A
+single write may jump at most `max_ahead_gap_mb` (default 1024 MiB) ahead
+of the streamed position; beyond that the upload fails. A write that
+lands behind bytes already streamed is rejected too, since those bytes
+are already on the wire. A dropped connection aborts the upload rather
+than committing a truncated file — `exit()` aborts anything still open
+rather than closing it.
+
+At startup the server warns when the disk behind `upload_buffer_dir` has
+less free space than a single upload may stage there. Every streamed
+upload logs its start and its end (path, bytes, duration, MiB/s), and a
+failure logs the reason.
 
 `Ops.touch()` is called at open time so the name shows up in a listing
-while the upload is still running, matching the WebDAV `PUT` path.
+while the upload is still running, matching the WebDAV `PUT` path. The
+GitHub blob behind the reservation is written in the background: a slow
+or briefly offline GitHub must not hold the open -- and with it the
+client's transfer -- hostage, since FileZilla gives up after 20 s of
+silence. The deferred write retries for about ten minutes; if it never
+lands the reference leaves the tree again and the failure is logged.
 
 ## Lifecycle
 

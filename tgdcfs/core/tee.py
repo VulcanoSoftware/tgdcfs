@@ -20,7 +20,8 @@ The pieces:
   never held up by a consumer that is gone.
 * :class:`TeeFileMessage` wraps the message the primary uploader reads
   and feeds every branch as a side effect of ``read``. The end of the
-  stream is signalled by the byte count, not by ``close``: the Telegram
+  stream is signalled by the byte count when the size is known, by the
+  stream's own EOF when it is not, never by ``close``: the Telegram
   uploader closes the message after every part.
 * :class:`TeeUpload` bundles the wrapped message with the mirror upload
   tasks and collects their replicas once the primary is done.
@@ -157,8 +158,8 @@ class TeeFileMessage(UploadableFileMessage):
             self._fed += len(data)
             for branch in self.branches:
                 await branch.feed(data)
-            if self._fed >= self._total:
-                await self.finish()
+        if not data or (self._total >= 0 and self._fed >= self._total):
+            await self.finish()
         return data
 
     async def finish(self) -> None:

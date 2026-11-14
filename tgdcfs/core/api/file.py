@@ -337,10 +337,16 @@ class FileApi:
         return moved_fr
 
     async def _create_new_file(
-        self, where: TGFSDirectory, file_msg: FileMessage
+        self,
+        where: TGFSDirectory,
+        file_msg: FileMessage,
+        defer_file_ref: bool = False,
     ) -> TGFSFileDesc:
         resp = await self._file_desc_api.create_file_desc(file_msg)
-        fr = await where.create_file_ref_async(file_msg.name, resp.message_id)
+        if defer_file_ref:
+            fr = await where.create_file_ref_deferred(file_msg.name, resp.message_id)
+        else:
+            fr = await where.create_file_ref_async(file_msg.name, resp.message_id)
         fr.mirrors = dict(resp.mirrors)
         fr.store = resp.store
         await self._metadata_api.push()
@@ -432,12 +438,13 @@ class FileApi:
         under: TGFSDirectory,
         file_msg: FileMessage,
         version_id: Optional[str] = None,
+        defer_file_ref: bool = False,
     ) -> TGFSFileDesc:
         try:
             fr = under.find_file(file_msg.name)
             return await self._update_existing_file(fr, file_msg, version_id)
         except FileOrDirectoryDoesNotExist:
-            return await self._create_new_file(under, file_msg)
+            return await self._create_new_file(under, file_msg, defer_file_ref)
 
     async def desc(
         self, fr: TGFSFileRef, include_all_versions: bool = False
