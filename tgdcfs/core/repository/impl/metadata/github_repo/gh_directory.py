@@ -74,6 +74,19 @@ class GithubConfig:
         compare=False,
         repr=False,
     )
+    # Serialises the file-reference blob writes of every directory that
+    # shares this repo. A delete or rename that lands while a deferred
+    # create is still retrying must not be undone by that retry -- the
+    # deleted or renamed file would reappear after a restart. The lock is
+    # FIFO-fair, so the write that asked first also runs first, and the
+    # in-tree check a deferred task does under the lock always sees the
+    # deletes that waited before it. The writer thread keeps the blocking
+    # blob calls themselves from interleaving.
+    lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock,
+        compare=False,
+        repr=False,
+    )
 
     async def write(self, fn: Callable[..., T], *args) -> T:
         """Run the blocking GitHub write ``fn`` off the event loop, after
@@ -373,7 +386,8 @@ class GithubDirectory(TGFSDirectory):
         # the GitHub call goes to the writer thread.
         file_ref = super().create_file_ref(name, file_message_id)
         try:
-            await self._ghc.write(self._put_file_ref, name, file_message_id)
+            async with self._ghc.lock:
+                await self._ghc.write(self._put_file_ref, name, file_message_id)
         except Exception as ex:
             logger.error(
                 f"Failed to create file reference {name} in "
@@ -409,7 +423,13 @@ class GithubDirectory(TGFSDirectory):
     ) -> None:
         for attempt in range(DEFERRED_PUT_ATTEMPTS):
             try:
-                await self._ghc.write(self._put_file_ref, name, file_message_id)
+                async with self._ghc.lock:
+                    # A delete or rename that waited for the lock took the
+                    # reference out of the tree; writing its blob anyway
+                    # would resurrect the deleted file after a restart.
+                    if not any(r is file_ref for r in self.files):
+                        return
+                    await self._ghc.write(self._put_file_ref, name, file_message_id)
                 return
             except Exception as ex:
                 if attempt == DEFERRED_PUT_ATTEMPTS - 1 or not _is_transient(ex):
@@ -444,10 +464,15 @@ class GithubDirectory(TGFSDirectory):
                 )
                 return
             except Exception as ex:
-                if _is_sha_missing(ex):
-                    # GitHub only sends this 422 when the blob is already
-                    # there: an earlier attempt got through although its
-                    # answer was lost.
+                if _is_sha_missing(ex) or (
+                    attempt > 0 and getattr(ex, "status", None) == 422
+                ):
+                    # GitHub only sends "sha wasn't supplied" when the blob
+                    # is already there: an earlier attempt got through
+                    # although its answer was lost. After an earlier
+                    # attempt, any 422 means the same -- the first attempt
+                    # was transient (otherwise it would have raised), so
+                    # this one is not a fresh validation error.
                     logger.info(
                         f"Created file reference {name} in {self._ghc.repo_name} "
                         f"at {file_path} (an earlier attempt landed)"
@@ -465,8 +490,12 @@ class GithubDirectory(TGFSDirectory):
         super().delete_file_ref(fr)
 
     async def delete_file_ref_async(self, fr: TGFSFileRef) -> None:
-        await self._ghc.write(self._drop_file_ref, fr)
-        super().delete_file_ref(fr)
+        # Under the lock, so a deferred create that is still retrying
+        # cannot re-create this blob after the drop (its in-tree check
+        # only helps if the removal happened before that check).
+        async with self._ghc.lock:
+            await self._ghc.write(self._drop_file_ref, fr)
+            super().delete_file_ref(fr)
 
     def _drop_file_ref(self, fr: TGFSFileRef) -> None:
         """Remove the file reference blob from the repo. Blocking; a blob

@@ -220,6 +220,89 @@ class TestCreateFileRefDeferred:
 
         assert len(directory.files) == 0
 
+    async def test_a_delete_that_lands_while_the_create_retries_wins(
+        self, ghc, monkeypatch
+    ):
+        """A file deleted while its deferred create still retries must not
+        reappear after a restart: the retry may not re-create the blob."""
+        from github import GithubException
+
+        from tgdcfs.core.repository.impl.metadata.github_repo import gh_directory
+
+        monkeypatch.setattr(gh_directory, "PUT_RETRY_DELAY", 0)
+        monkeypatch.setattr(gh_directory, "DEFERRED_PUT_RETRY_DELAY", 0.01)
+        first_call = threading.Event()
+        proceed = threading.Event()
+        order: list[str] = []
+
+        def create_file(**_):
+            order.append("create")
+            if not first_call.is_set():
+                first_call.set()
+                proceed.wait(timeout=5)
+            raise GithubException(500, {}, {})
+
+        def delete_file(**_):
+            order.append("delete")
+
+        ghc.repo.create_file.side_effect = create_file
+        ghc.repo.delete_file.side_effect = delete_file
+        ghc.repo.get_contents.return_value = Mock(sha="abc")
+        directory = GithubDirectory(ghc, "d", None)
+
+        fr = await directory.create_file_ref_deferred("f", 1)
+        for _ in range(100):
+            if first_call.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert first_call.is_set()
+
+        deleter = asyncio.ensure_future(directory.delete_file_ref_async(fr))
+        await asyncio.sleep(0.05)
+        # The delete waits for the retrying create instead of racing it.
+        assert not deleter.done()
+        proceed.set()
+
+        await deleter
+        await self._wait_for_background(directory)
+
+        # The retry saw the ref gone from the tree: no blob was written
+        # after the delete.
+        assert "delete" in order
+        assert "create" not in order[order.index("delete") + 1 :]
+        assert len(directory.files) == 0
+
+    async def test_a_permanent_failure_leaves_the_path_consistent(
+        self, ghc, monkeypatch
+    ):
+        """When the deferred create gives up and drops the ref while the
+        upload is still running, a fresh ref for the same name works and
+        nothing is left half-written."""
+        from github import GithubException
+
+        from tgdcfs.core.repository.impl.metadata.github_repo import gh_directory
+
+        monkeypatch.setattr(gh_directory, "PUT_RETRY_DELAY", 0)
+        monkeypatch.setattr(gh_directory, "DEFERRED_PUT_RETRY_DELAY", 0)
+        ghc.repo.create_file.side_effect = GithubException(500, {}, {})
+        directory = GithubDirectory(ghc, "d", None)
+
+        await directory.create_file_ref_deferred("f", 1)
+        await self._wait_for_background(directory)
+        assert len(directory.files) == 0
+
+        ghc.repo.create_file.side_effect = None  # GitHub recovered
+        await directory.create_file_ref_deferred("f", 99)
+        await self._wait_for_background(directory)
+
+        assert [r.message_id for r in directory.files] == [99]
+        ghc.repo.create_file.assert_called_with(
+            path="f.99",
+            message="Create file reference for f",
+            content="",
+            branch="main",
+        )
+
     async def test_a_plain_directory_defers_to_the_sync_path(self):
         a = TGFSDirectory("a", None, [], [])
 
@@ -347,6 +430,11 @@ class TestPutRetries:
         self._outcomes(ghc, ["422"])
         GithubDirectory(ghc, "d", None)._put_file_ref("a", 1)
         assert ghc.repo.create_file.call_count == 1
+
+    def test_a_plain_422_after_an_earlier_attempt_is_accepted(self, ghc):
+        self._outcomes(ghc, ["conn", "422-other"])
+        GithubDirectory(ghc, "d", None)._put_file_ref("a", 1)
+        assert ghc.repo.create_file.call_count == 2
 
     def test_an_unrelated_422_is_still_an_error(self, ghc):
         from github import GithubException

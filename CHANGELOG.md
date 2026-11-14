@@ -67,6 +67,13 @@ the fact on the commits that shipped them.
 
 ### Fixed
 
+- A file deleted or renamed while its deferred file-reference create was
+  still retrying could reappear after a restart: the retry re-created the
+  blob the delete had just removed. All file-reference blob writes of a
+  repo are serialised now, and a deferred create that finds its reference
+  gone from the tree stops instead of writing. A 422 answer after an
+  earlier attempt (whose response was lost) is also accepted as "the blob
+  landed" without matching GitHub's message text.
 - An SFTP upload no longer fails with "Connection timed out after 20
   seconds of inactivity" when GitHub is slow or briefly unavailable. The
   file reference that reserves the name at open was written to the GitHub
