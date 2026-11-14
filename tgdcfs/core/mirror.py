@@ -213,13 +213,13 @@ class MirrorGroup:
         """Split ``file_msg`` for the primary and every re-uploading mirror.
 
         Returns ``None`` when no mirror needs the stream or the size is
-        unknown or zero; the caller then uploads ``file_msg`` as it is.
-        Otherwise the primary uploads ``TeeUpload.message`` and, while it
-        does, one task per target uploads the same bytes as a replica.
+        zero; the caller then uploads ``file_msg`` as it is. An unknown
+        size (an SFTP upload, ``-1``) is fine: the branches end at the
+        stream's own EOF instead of at a byte count.
         """
         size = file_msg.get_size()
         targets = self.tee_targets()
-        if not targets or size <= 0:
+        if not targets or size == 0:
             return None
         name = file_msg.file_name()
         branches = [TeeBranch(ch.key, buffer_bytes) for ch in targets]

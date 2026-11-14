@@ -75,6 +75,11 @@ the fact on the commits that shipped them.
   drops the file from the live listing: GitHub's 422 "sha wasn't supplied"
   answer means the blob already landed, and is now accepted as success on
   every retry instead of only within one attempt.
+- With `sync: tee`, streamed uploads of unknown size (SFTP) now feed the
+  re-uploading mirrors from the stream too. The tee refused a stream
+  without a size, so with a Discord mirror nothing at all arrived there
+  until a later background pass; the branches now end at the stream's
+  own EOF instead of at a byte count.
 - An upload that fails or is cut off (client timeout, reset connection) no
   longer leaves the empty file behind that the PUT creates first. FileZilla
   listed it as an existing 0 B file and asked "Target file already exists" on
