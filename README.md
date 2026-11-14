@@ -115,14 +115,16 @@ applying; everyone else falls back to password authentication.
 
 **Uploads are streamed.** An incoming SFTP upload goes straight to
 Telegram and Discord as the data arrives, even though SFTP never announces
-the file size up front. Writes that run ahead of the upload are buffered in
-memory up to `upload_buffer_size_mb` (default 64) and spill to
-`upload_buffer_dir` (the system temp directory when unset) beyond that. A
-client that rewrites an earlier part of the file before anything has been
-streamed falls back to buffering the whole file as before; rewriting after
-streaming has started is rejected. A transfer that is cut off mid-flight is
-discarded rather than committed, so an interrupted upload never truncates
-an existing file.
+the file size up front. Writes that run ahead of the upload are staged in a
+spooled buffer: in memory up to `upload_buffer_size_mb` (default 64) and on
+disk in `upload_buffer_dir` (the system temp directory when unset) beyond
+that, so heavily interleaved clients (sshfs, rclone) work whatever order
+their writes arrive in. The upload only consumes a staged region once it is
+contiguous, and a gap no write ever covers is zero-filled on close. A write
+that lands behind bytes already streamed is rejected, and so is a jump
+further ahead than `max_ahead_gap_mb` (default 1024). A transfer that is
+cut off mid-flight is discarded rather than committed, so an interrupted
+upload never truncates an existing file.
 
 **Known limits**, all of them shared with the WebDAV interface: files
 cannot be appended to or partially updated (every write stores a new

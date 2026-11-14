@@ -98,15 +98,24 @@ Telegram streamed-upload protocol (`upload.saveBigFilePart` with
 travel while the client is still writing. The Discord store already takes
 an unknown size.
 
-Writes that run ahead of the streamed position are staged in memory up to
-`upload_buffer_size_mb`, on disk beyond that, and flushed in order as the
-upload consumes them. A write that goes backwards before anything has been
-streamed falls back to the old spool path (`SpooledTemporaryFile`) so
-out-of-order and sparse writes keep working; a backwards write after
-streaming has started is rejected, since those bytes are already on the
-wire. A dropped connection aborts the upload rather than committing a
-truncated file — `exit()` aborts anything still open rather than closing
-it.
+Writes that run ahead of the streamed position -- pipelined clients such
+as sshfs or rclone keep many requests in flight -- are staged in a spooled
+buffer: in memory up to `upload_buffer_size_mb`, on disk in
+`upload_buffer_dir` beyond that. The upload only moves through a staged
+region once it is contiguous from the streamed position, so the stores
+always see the file in byte order and a gap waits for the write that
+belongs there; a gap no write ever covers is zero-filled on close. A
+single write may jump at most `max_ahead_gap_mb` (default 1024 MiB) ahead
+of the streamed position; beyond that the upload fails. A write that
+lands behind bytes already streamed is rejected too, since those bytes
+are already on the wire. A dropped connection aborts the upload rather
+than committing a truncated file — `exit()` aborts anything still open
+rather than closing it.
+
+At startup the server warns when the disk behind `upload_buffer_dir` has
+less free space than a single upload may stage there. Every streamed
+upload logs its start and its end (path, bytes, duration, MiB/s), and a
+failure logs the reason.
 
 `Ops.touch()` is called at open time so the name shows up in a listing
 while the upload is still running, matching the WebDAV `PUT` path. The

@@ -259,7 +259,8 @@ class SFTPConfig:
     single write may jump before it is treated as hostile and fails the
     upload. Within that bound a client may write as far ahead as it
     likes; the buffer takes it, in memory first and on disk beyond
-    ``upload_buffer_size_mb``.
+    ``upload_buffer_size_mb``. A gap that no write ever covers is
+    zero-filled when the client closes the file.
     """
 
     enabled: bool
