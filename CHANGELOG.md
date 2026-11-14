@@ -71,6 +71,10 @@ the fact on the commits that shipped them.
   blob write now runs in the background and retries for about ten minutes
   before the reference is given up on; the upload itself only talks to
   Telegram and Discord.
+- A background file reference write whose HTTP response got lost no longer
+  drops the file from the live listing: GitHub's 422 "sha wasn't supplied"
+  answer means the blob already landed, and is now accepted as success on
+  every retry instead of only within one attempt.
 - An upload that fails or is cut off (client timeout, reset connection) no
   longer leaves the empty file behind that the PUT creates first. FileZilla
   listed it as an existing 0 B file and asked "Target file already exists" on

@@ -40,6 +40,15 @@ def _is_transient(ex: Exception) -> bool:
     return isinstance(ex, (requests.exceptions.RequestException, OSError))
 
 
+def _is_sha_missing(ex: Exception) -> bool:
+    status = getattr(ex, "status", None)
+    if status != 422:
+        return False
+    data = getattr(ex, "data", None)
+    message = data.get("message", "") if isinstance(data, dict) else ""
+    return '"sha" wasn\'t supplied' in str(message)
+
+
 @dataclass
 class GithubConfig:
     gh: Github
@@ -348,7 +357,11 @@ class GithubDirectory(TGFSDirectory):
         file_ref = super().create_file_ref(name, file_message_id)
         try:
             self._put_file_ref(name, file_message_id)
-        except Exception:
+        except Exception as ex:
+            logger.error(
+                f"Failed to create file reference {name} in "
+                f"{self._ghc.repo_name}: {ex}"
+            )
             self.files.remove(file_ref)
             raise
         return file_ref
@@ -361,7 +374,11 @@ class GithubDirectory(TGFSDirectory):
         file_ref = super().create_file_ref(name, file_message_id)
         try:
             await self._ghc.write(self._put_file_ref, name, file_message_id)
-        except Exception:
+        except Exception as ex:
+            logger.error(
+                f"Failed to create file reference {name} in "
+                f"{self._ghc.repo_name}: {ex}"
+            )
             self.files.remove(file_ref)
             raise
         return file_ref
@@ -427,19 +444,16 @@ class GithubDirectory(TGFSDirectory):
                 )
                 return
             except Exception as ex:
-                if attempt > 0 and getattr(ex, "status", None) == 422:
-                    # An earlier attempt got through although its answer was
-                    # lost: the blob is there.
+                if _is_sha_missing(ex):
+                    # GitHub only sends this 422 when the blob is already
+                    # there: an earlier attempt got through although its
+                    # answer was lost.
                     logger.info(
                         f"Created file reference {name} in {self._ghc.repo_name} "
                         f"at {file_path} (an earlier attempt landed)"
                     )
                     return
                 if attempt == PUT_ATTEMPTS - 1 or not _is_transient(ex):
-                    logger.error(
-                        f"Failed to create file reference {name} in "
-                        f"{self._ghc.repo_name}: {ex}"
-                    )
                     raise
                 logger.warning(
                     f"Creating file reference {name} failed ({ex}); trying again"

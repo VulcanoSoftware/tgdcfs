@@ -176,6 +176,37 @@ class TestCreateFileRefDeferred:
         assert ghc.repo.create_file.call_count == 2
         assert [r.name for r in directory.files] == ["f"]
 
+    async def test_a_blob_that_landed_on_the_last_inner_attempt_survives(
+        self, ghc, monkeypatch
+    ):
+        import requests
+        from github import GithubException
+
+        from tgdcfs.core.repository.impl.metadata.github_repo import gh_directory
+
+        monkeypatch.setattr(gh_directory, "PUT_RETRY_DELAY", 0)
+        lost_response = requests.exceptions.ConnectionError("IncompleteRead")
+        sha_missing = GithubException(
+            422,
+            {"message": 'Invalid request.\n\n"sha" wasn\'t supplied.'},
+            {},
+        )
+        ghc.repo.create_file.side_effect = [
+            lost_response,
+            lost_response,
+            lost_response,
+            sha_missing,
+        ]
+        directory = GithubDirectory(ghc, "d", None)
+
+        await directory.create_file_ref_deferred("f", 1)
+        assert [r.name for r in directory.files] == ["f"]
+
+        await self._wait_for_background(directory)
+
+        assert ghc.repo.create_file.call_count == 4
+        assert [r.name for r in directory.files] == ["f"]
+
     async def test_a_permanent_failure_drops_the_ref(self, ghc):
         from github import GithubException
 
@@ -288,7 +319,15 @@ class TestPutRetries:
 
         table = {
             "conn": requests.exceptions.ConnectionError("Max retries"),
-            "422": GithubException(422, {}, {}),
+            "422": GithubException(
+                422,
+                {
+                    "message": 'Invalid request.\n\n"sha" wasn\'t supplied.',
+                    "status": "422",
+                },
+                {},
+            ),
+            "422-other": GithubException(422, {"message": "Invalid request."}, {}),
             "500": GithubException(500, {}, {}),
             "404": GithubException(404, {}, {}),
             "ok": None,
@@ -303,6 +342,19 @@ class TestPutRetries:
     def test_an_attempt_that_landed_is_not_an_error(self, ghc):
         self._outcomes(ghc, ["conn", "422"])
         GithubDirectory(ghc, "d", None)._put_file_ref("a", 1)
+
+    def test_a_422_on_the_first_attempt_means_the_blob_is_already_there(self, ghc):
+        self._outcomes(ghc, ["422"])
+        GithubDirectory(ghc, "d", None)._put_file_ref("a", 1)
+        assert ghc.repo.create_file.call_count == 1
+
+    def test_an_unrelated_422_is_still_an_error(self, ghc):
+        from github import GithubException
+
+        self._outcomes(ghc, ["422-other"])
+        with pytest.raises(GithubException):
+            GithubDirectory(ghc, "d", None)._put_file_ref("a", 1)
+        assert ghc.repo.create_file.call_count == 1
 
     def test_a_refusal_is_not_retried(self, ghc):
         from github import GithubException
