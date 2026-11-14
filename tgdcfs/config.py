@@ -266,6 +266,12 @@ class SFTPConfig:
     (``0`` means no cap); a close that would exceed it is answered only
     once earlier uploads have finished.
 
+    ``stream_window_mb`` is how far a client may run ahead of the upload
+    before its writes are held back, which is what keeps a fast client from
+    filling the scratch disk. ``0`` (the default) sizes it automatically
+    from the free space of the disk the upload is buffered on; a positive
+    value fixes it.
+
     Uploads always run *while* the client is still sending. Telegram has a documented way to upload a file
     whose length is not known yet ("streamed uploads": every part says
     ``file_total_parts = -1`` except the last), which is used for Telegram
@@ -290,10 +296,13 @@ class SFTPConfig:
     write_behind: bool = False
     write_behind_max_mb: int = 2048
     stream_segment_mb: int = 256
+    stream_window_mb: int = 0
 
     # A segment is one document, and a document is below 2 GB.
     MAX_STREAM_SEGMENT_MB = 1900
     DEFAULT_STREAM_SEGMENT_MB = 256
+    # 0 = work the window out from the free space of the spool disk.
+    DEFAULT_STREAM_WINDOW_MB = 0
     DEFAULT_PORT = 2222
     DEFAULT_WRITE_BEHIND_MAX_MB = 2048
     DEFAULT_HOST_KEY_FILE = "sftp_host_key"
@@ -302,6 +311,11 @@ class SFTPConfig:
     @property
     def upload_buffer_size_bytes(self) -> int:
         return self.upload_buffer_size_mb * 1024 * 1024
+
+    @property
+    def stream_window_bytes(self) -> int:
+        """Manual stream window in bytes; ``0`` means size it automatically."""
+        return self.stream_window_mb * 1024 * 1024
 
     @property
     def write_behind_max_bytes(self) -> int:
@@ -346,6 +360,14 @@ class SFTPConfig:
                 f"{cls.MAX_STREAM_SEGMENT_MB}, got {stream_segment_mb}"
             )
 
+        stream_window_mb = int(
+            data.get("stream_window_mb", cls.DEFAULT_STREAM_WINDOW_MB)
+        )
+        if stream_window_mb < 0:
+            raise ValueError(
+                f"sftp.stream_window_mb must not be negative, got {stream_window_mb}"
+            )
+
         return cls(
             enabled=bool(data.get("enabled", False)),
             host=str(data.get("host", "0.0.0.0")),  # noqa: S104
@@ -367,6 +389,7 @@ class SFTPConfig:
             write_behind=bool(data.get("write_behind", False)),
             write_behind_max_mb=write_behind_max_mb,
             stream_segment_mb=stream_segment_mb,
+            stream_window_mb=stream_window_mb,
         )
 
 

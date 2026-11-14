@@ -564,8 +564,14 @@ export const importConfig = (text: string): ImportedConfig => {
       "host_key_file",
       "authorized_keys_dir",
       "upload_buffer_size_mb",
+      "write_behind",
+      "write_behind_max_mb",
+      "stream_segment_mb",
+      "stream_window_mb",
     ]);
     const fallback = config.tgdcfs.sftp;
+    // 0 (or no value) is the automatic window; anything above is a fixed one.
+    const windowMb = asNumber(sftp.stream_window_mb, 0);
     config.tgdcfs.sftp = {
       enabled: asBoolean(sftp.enabled, false),
       host: asString(sftp.host, fallback.host),
@@ -576,6 +582,17 @@ export const importConfig = (text: string): ImportedConfig => {
         sftp.upload_buffer_size_mb,
         fallback.upload_buffer_size_mb
       ),
+      write_behind: asBoolean(sftp.write_behind, fallback.write_behind),
+      write_behind_max_mb: asNumber(
+        sftp.write_behind_max_mb,
+        fallback.write_behind_max_mb
+      ),
+      stream_segment_mb: asNumber(
+        sftp.stream_segment_mb,
+        fallback.stream_segment_mb
+      ),
+      stream_window_auto: windowMb <= 0,
+      stream_window_mb: windowMb > 0 ? windowMb : fallback.stream_window_mb,
     };
   }
 

@@ -1206,3 +1206,59 @@ class TestDeleteFanOut:
 
         assert cache.entry(old.id) is None
         assert cache.entry(new.id) is not None
+
+
+class TestStartupDiskCheck:
+    """The cache says at startup when its disk cannot hold what the config allows."""
+
+    MIB = 1024 * 1024
+
+    def load(self, tmp_path, monkeypatch, free, **overrides):
+        monkeypatch.setattr(LocalCache, "_disk_free", lambda self: free)
+        return make_cache(tmp_path, **overrides)
+
+    def test_a_disk_below_min_free_warns_that_nothing_can_be_cached(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        self.load(
+            tmp_path, monkeypatch, 700 * self.MIB, max_size_mb=8192, min_free_mb=1024
+        )
+
+        assert "can never hold anything" in caplog.text
+        assert "cache.min_free_mb" in caplog.text
+
+    def test_a_disk_smaller_than_the_budget_warns_about_the_real_limit(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        self.load(
+            tmp_path, monkeypatch, 3000 * self.MIB, max_size_mb=8192, min_free_mb=1024
+        )
+
+        assert "can never hold anything" not in caplog.text
+        assert "limits it to about" in caplog.text
+
+    def test_a_roomy_disk_is_silent(self, tmp_path, monkeypatch, caplog):
+        self.load(
+            tmp_path, monkeypatch, 50_000 * self.MIB, max_size_mb=8192, min_free_mb=1024
+        )
+
+        assert "Cache: it can never" not in caplog.text
+        assert "limits it" not in caplog.text
+
+    def test_an_unlimited_budget_only_warns_when_nothing_fits(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        self.load(tmp_path, monkeypatch, 3000 * self.MIB, max_size_mb=0, min_free_mb=1024)
+
+        assert "limits it" not in caplog.text
+
+    def test_no_headroom_means_no_check(self, tmp_path, monkeypatch, caplog):
+        self.load(tmp_path, monkeypatch, 10 * self.MIB, max_size_mb=8192, min_free_mb=0)
+
+        assert "Cache: it can never" not in caplog.text
+        assert "limits it" not in caplog.text
+
+    def test_an_unknown_disk_is_not_a_warning(self, tmp_path, monkeypatch, caplog):
+        self.load(tmp_path, monkeypatch, None, max_size_mb=8192, min_free_mb=1024)
+
+        assert "can never hold anything" not in caplog.text

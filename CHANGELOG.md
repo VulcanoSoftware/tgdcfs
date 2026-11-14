@@ -20,8 +20,18 @@ the fact on the commits that shipped them.
 
 - While an SFTP upload streams, bytes already sent to the stores are handed
   back to the disk (hole punching) and the client's writes wait once it is
-  more than 128 MiB ahead of the upload. Before, the whole file stayed in the
-  scratch space, which filled up on large files (`No space left on device`).
+  more than the window ahead of the upload. Before, the whole file stayed in
+  the scratch space, which filled up on large files
+  (`No space left on device`). `tgdcfs.sftp.stream_window_mb` sets the window;
+  the default `0` sizes it automatically as an eighth of the free space of the
+  disk the upload is buffered on, between 16 and 512 MB.
+- A streamed SFTP upload logs when it starts and when it ends (size, time and
+  speed), and an error if it fails.
+- At startup the local cache warns when its disk cannot hold what the config
+  allows (`cache.min_free_mb` larger than the free space, or less room than
+  `max_size_mb`). Before, the only sign was a warning on every read.
+- The config generator has the SFTP upload settings: the upload window
+  (automatic or fixed), the segment size and write-behind.
 
 - SFTP uploads always stream, and `tgdcfs.sftp.stream_segment_mb`
   (default `256`, at most `1900`). An SFTP upload no longer has to be

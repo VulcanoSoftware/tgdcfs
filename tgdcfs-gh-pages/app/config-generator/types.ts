@@ -61,6 +61,12 @@ export interface SftpConfig {
   host_key_file: string;
   authorized_keys_dir: string;
   upload_buffer_size_mb: number;
+  write_behind: boolean;
+  write_behind_max_mb: number;
+  stream_segment_mb: number;
+  // The generator keeps "automatic" as its own switch; the file stores 0.
+  stream_window_auto: boolean;
+  stream_window_mb: number;
 }
 
 export interface CacheConfig {
@@ -232,6 +238,11 @@ export const defaultConfig = (): ConfigData => ({
       host_key_file: "sftp_host_key",
       authorized_keys_dir: "",
       upload_buffer_size_mb: 64,
+      write_behind: false,
+      write_behind_max_mb: 2048,
+      stream_segment_mb: 256,
+      stream_window_auto: true,
+      stream_window_mb: 128,
     },
     cache: { ...CACHE_DEFAULTS },
     listing: { ...LISTING_DEFAULTS },

@@ -83,6 +83,8 @@ tgdcfs:
     # write_behind: false         # answer an upload once it is buffered
     # write_behind_max_mb: 2048   # most data held back this way, 0 = no cap
     # stream_segment_mb: 256      # segment size for stores that cannot stream
+    # stream_window_mb: 0         # how far a client may run ahead of the upload;
+                                  # 0 = automatic (1/8 of the free spool disk, 16-512 MB)
 ```
 
 Both interfaces run in the same process and go through the same core, so

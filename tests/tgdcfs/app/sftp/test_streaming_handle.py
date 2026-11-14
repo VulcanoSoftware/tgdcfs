@@ -10,7 +10,13 @@ import asyncio
 from typing import Callable
 
 import pytest
-from tgdcfs.app.sftp.handles import WriteHandle
+from tgdcfs.app.sftp.handles import (
+    STREAM_WINDOW_FALLBACK_BYTES,
+    STREAM_WINDOW_MAX_BYTES,
+    STREAM_WINDOW_MIN_BYTES,
+    WriteHandle,
+    auto_stream_window,
+)
 
 SEGMENT = 100
 
@@ -41,12 +47,13 @@ class StreamingOps:
             pass
 
 
-def handle(ops, segment: int = SEGMENT) -> WriteHandle:
+def handle(ops, segment: int = SEGMENT, window: int = 0) -> WriteHandle:
     return WriteHandle(
         ops,  # type: ignore[arg-type]
         "/big.bin",
         spool_max_bytes=64,
         stream_segment_bytes=segment,
+        stream_window_bytes=window,
     )
 
 
@@ -282,10 +289,9 @@ class SlowOps(StreamingOps):
 
 
 class TestKeepsTheDiskClear:
-    async def test_a_client_that_outruns_the_upload_is_held_back(self, monkeypatch):
-        monkeypatch.setattr("tgdcfs.app.sftp.handles.STREAM_WINDOW_BYTES", 1000)
+    async def test_a_client_that_outruns_the_upload_is_held_back(self):
         ops = SlowOps()
-        h = handle(ops)
+        h = handle(ops, window=1000)
         await h.write(0, data(SEGMENT))  # starts the stream, which is stuck
 
         far_ahead = asyncio.create_task(h.write(5000, data(1000, 5000)))
@@ -299,10 +305,9 @@ class TestKeepsTheDiskClear:
         await h.close()
         assert bytes(ops.received) == data(6000)
 
-    async def test_a_write_just_ahead_is_not_held_back(self, monkeypatch):
-        monkeypatch.setattr("tgdcfs.app.sftp.handles.STREAM_WINDOW_BYTES", 1000)
+    async def test_a_write_just_ahead_is_not_held_back(self):
         ops = SlowOps()
-        h = handle(ops)
+        h = handle(ops, window=1000)
         await h.write(0, data(SEGMENT))
 
         await asyncio.wait_for(h.write(SEGMENT, data(500, SEGMENT)), timeout=1)
@@ -310,11 +315,10 @@ class TestKeepsTheDiskClear:
         ops.gate.set()
         await h.close()
 
-    async def test_a_failed_upload_does_not_leave_a_writer_waiting(self, monkeypatch):
-        monkeypatch.setattr("tgdcfs.app.sftp.handles.STREAM_WINDOW_BYTES", 1000)
+    async def test_a_failed_upload_does_not_leave_a_writer_waiting(self):
         ops = SlowOps()
         ops.fail_with = RuntimeError("telegram said no")
-        h = handle(ops)
+        h = handle(ops, window=1000)
         await h.write(0, data(SEGMENT))
         waiting = asyncio.create_task(h.write(5000, data(1000, 5000)))
         await asyncio.sleep(0.05)
@@ -354,3 +358,99 @@ class TestKeepsTheDiskClear:
 
         assert bytes(ops.received) == data(40_000)
         assert h._can_punch is False
+
+
+class TestWindowSize:
+    def test_the_window_is_an_eighth_of_the_free_space(self, monkeypatch):
+        gib = 1024**3
+        monkeypatch.setattr(
+            "tgdcfs.app.sftp.handles.shutil.disk_usage",
+            lambda _: type("U", (), {"free": 2 * gib})(),
+        )
+
+        assert auto_stream_window(None) == 2 * gib // 8
+
+    @pytest.mark.parametrize(
+        ("free", "expected"),
+        [
+            (1024**2, STREAM_WINDOW_MIN_BYTES),  # a nearly full disk still moves
+            (100 * 1024**4, STREAM_WINDOW_MAX_BYTES),  # a huge disk is capped
+        ],
+    )
+    def test_the_window_stays_within_bounds(self, monkeypatch, free, expected):
+        monkeypatch.setattr(
+            "tgdcfs.app.sftp.handles.shutil.disk_usage",
+            lambda _: type("U", (), {"free": free})(),
+        )
+
+        assert auto_stream_window("/spool") == expected
+
+    def test_an_unreadable_disk_falls_back(self, monkeypatch):
+        def broken(_):
+            raise OSError("no such device")
+
+        monkeypatch.setattr("tgdcfs.app.sftp.handles.shutil.disk_usage", broken)
+
+        assert auto_stream_window(None) == STREAM_WINDOW_FALLBACK_BYTES
+
+    async def test_the_handle_sizes_itself_when_no_window_is_set(self, monkeypatch):
+        monkeypatch.setattr(
+            "tgdcfs.app.sftp.handles.auto_stream_window", lambda _dir: 4321
+        )
+        ops = StreamingOps()
+        h = handle(ops)
+
+        await h.write(0, data(SEGMENT))
+        await asyncio.wait_for(ops.started.wait(), timeout=5)
+
+        assert h._window == 4321
+        await h.close()
+
+    async def test_a_manual_window_is_left_alone(self, monkeypatch):
+        monkeypatch.setattr(
+            "tgdcfs.app.sftp.handles.auto_stream_window", lambda _dir: 4321
+        )
+        ops = StreamingOps()
+        h = handle(ops, window=777)
+
+        await h.write(0, data(SEGMENT))
+        await asyncio.wait_for(ops.started.wait(), timeout=5)
+
+        assert h._window == 777
+        await h.close()
+
+
+class TestLogging:
+    async def test_a_streamed_upload_logs_its_start_and_end(self, caplog):
+        caplog.set_level("INFO", logger="tgdcfs.app.sftp.handles")
+        ops = StreamingOps()
+        h = handle(ops)
+
+        await h.write(0, data(250))
+        await h.close()
+
+        assert "Streaming upload of /big.bin started" in caplog.text
+        assert "Streamed upload of /big.bin finished" in caplog.text
+        assert "MiB/s" in caplog.text
+
+    async def test_a_failed_streamed_upload_is_logged(self, caplog):
+        caplog.set_level("INFO", logger="tgdcfs.app.sftp.handles")
+        ops = StreamingOps(fail_with=RuntimeError("telegram said no"))
+        h = handle(ops)
+        await h.write(0, data(250))
+
+        with pytest.raises(RuntimeError):
+            await h.close()
+
+        assert "Streamed upload of /big.bin failed" in caplog.text
+        assert "telegram said no" in caplog.text
+
+    async def test_a_small_file_logs_nothing_about_streaming(self, caplog):
+        caplog.set_level("INFO", logger="tgdcfs.app.sftp.handles")
+        ops = StreamingOps()
+        h = handle(ops)
+
+        await h.write(0, data(10))
+        await h.close()
+
+        assert "Streaming upload" not in caplog.text

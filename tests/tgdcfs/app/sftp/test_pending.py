@@ -323,6 +323,21 @@ class TestStreamConfig:
     def test_there_is_no_switch_to_turn_streaming_off(self):
         assert not hasattr(SFTPConfig.from_dict({}), "stream_uploads")
 
+    def test_the_window_is_automatic_by_default(self):
+        cfg = SFTPConfig.from_dict({})
+
+        assert cfg.stream_window_mb == 0
+        assert cfg.stream_window_bytes == 0
+
+    def test_the_window_can_be_set_by_hand(self):
+        cfg = SFTPConfig.from_dict({"stream_window_mb": 64})
+
+        assert cfg.stream_window_bytes == 64 * 1024 * 1024
+
+    def test_a_negative_window_is_rejected(self):
+        with pytest.raises(ValueError, match="stream_window_mb"):
+            SFTPConfig.from_dict({"stream_window_mb": -1})
+
     @pytest.mark.parametrize("value", [0, -1, 1901, 4096])
     def test_a_segment_must_fit_one_telegram_document(self, value):
         with pytest.raises(ValueError, match="stream_segment_mb"):

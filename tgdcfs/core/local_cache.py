@@ -477,6 +477,34 @@ class LocalCache:
             f"{self.used_bytes()} of {self.config.max_size_bytes or 'unlimited'} bytes "
             f"in {self.directory}"
         )
+        self._warn_if_budget_unreachable()
+
+    def _warn_if_budget_unreachable(self) -> None:
+        """Say so at startup when the disk cannot hold what the config allows.
+
+        The cache may use the free space of its disk plus what it already
+        holds, minus ``min_free``. When that is nothing, no read is ever
+        cached, and the only sign used to be a warning per read.
+        """
+        free = self._disk_free()
+        cfg = self.config
+        if free is None or not cfg.min_free_bytes:
+            return
+        capacity = max(0, free + self.used_bytes() - cfg.min_free_bytes)
+        if capacity == 0:
+            logger.warning(
+                f"Cache: it can never hold anything. {self.directory} has "
+                f"{format_bytes(free)} free and min_free_mb keeps "
+                f"{format_bytes(cfg.min_free_bytes)} of it free. Lower "
+                "cache.min_free_mb or give that disk more space."
+            )
+        elif cfg.max_size_bytes and capacity < cfg.max_size_bytes:
+            logger.warning(
+                f"Cache: the disk limits it to about {format_bytes(capacity)} "
+                f"although max_size_mb allows {format_bytes(cfg.max_size_bytes)} "
+                f"({format_bytes(free)} free in {self.directory}, min_free_mb "
+                f"keeps {format_bytes(cfg.min_free_bytes)} free)."
+            )
 
     def _load_entry(self, version_id: str, data: dict) -> Optional[CacheEntry]:
         try:

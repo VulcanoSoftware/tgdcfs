@@ -2,8 +2,10 @@ import asyncio
 import errno
 import logging
 import os
+import shutil
 import tempfile
 import threading
+import time
 from typing import AsyncIterator, Optional
 
 from tgdcfs.core import Ops
@@ -29,10 +31,32 @@ SPOOL_READ_CHUNK = 1024 * 1024
 # other, with the whole size known.
 STREAM_START_BYTES = 8 * 1024 * 1024
 
-# How far the client may run ahead of the upload before its writes wait, and
-# the granularity at which sent bytes are handed back to the filesystem.
-STREAM_WINDOW_BYTES = 128 * 1024 * 1024
+# How far the client may run ahead of the upload before its writes wait.
+# Automatic sizing takes an eighth of the free space of the spool disk,
+# within these bounds; the fallback applies when that cannot be read.
+STREAM_WINDOW_MIN_BYTES = 16 * 1024 * 1024
+STREAM_WINDOW_MAX_BYTES = 512 * 1024 * 1024
+STREAM_WINDOW_FALLBACK_BYTES = 128 * 1024 * 1024
+_STREAM_WINDOW_FREE_FRACTION = 8
+
+# Granularity at which sent bytes are handed back to the filesystem.
 _PUNCH_ALIGN = 1024 * 1024
+
+
+def auto_stream_window(spool_dir: Optional[str]) -> int:
+    """A window that fits the free space of the disk the spool lives on."""
+    try:
+        free = shutil.disk_usage(spool_dir or tempfile.gettempdir()).free
+    except OSError:
+        return STREAM_WINDOW_FALLBACK_BYTES
+    return max(
+        STREAM_WINDOW_MIN_BYTES,
+        min(STREAM_WINDOW_MAX_BYTES, free // _STREAM_WINDOW_FREE_FRACTION),
+    )
+
+
+def _mib(size: int) -> str:
+    return f"{size / (1024 * 1024):.1f} MiB"
 
 
 def _punch_hole(fd: int, offset: int, length: int) -> bool:
@@ -232,6 +256,7 @@ class WriteHandle(Handle):
         pending: Optional[PendingUploads] = None,
         client_name: str = "",
         stream_segment_bytes: int = 0,
+        stream_window_bytes: int = 0,
     ):
         self._ops = ops
         self._path = path
@@ -260,6 +285,9 @@ class WriteHandle(Handle):
         self._hwm = 0
         self._islands: list[tuple[int, int]] = []
         self._yielded = 0
+        self._window_setting = stream_window_bytes
+        self._window = stream_window_bytes or STREAM_WINDOW_FALLBACK_BYTES
+        self._stream_started_at = 0.0
         self._punched = 0
         self._can_punch = True
         self._finished = False
@@ -285,7 +313,7 @@ class WriteHandle(Handle):
             return
         async with self._cond:
             await self._cond.wait_for(
-                lambda: offset - self._yielded <= STREAM_WINDOW_BYTES
+                lambda: offset - self._yielded <= self._window
                 or self._stream is None
                 or self._stream.done()
                 or self._aborted
@@ -376,6 +404,16 @@ class WriteHandle(Handle):
             if self._stream is None and self._hwm >= self._start_bytes:
                 # Sent bytes are released on disk, which needs a real file.
                 await asyncio.to_thread(self._spool.rollover)
+                if not self._window_setting:
+                    self._window = auto_stream_window(self._spool_dir)
+                self._stream_started_at = time.monotonic()
+                logger.info(
+                    "Streaming upload of %s started (%s received, client may "
+                    "run %s ahead of the upload)",
+                    self._path,
+                    _mib(self._hwm),
+                    _mib(self._window),
+                )
                 self._stream = asyncio.create_task(
                     self._ops.upload_from_unsized_stream(
                         self._growing(),
@@ -399,7 +437,24 @@ class WriteHandle(Handle):
             self._hwm = self._size
             self._finished = True
             self._cond.notify_all()
-        await self._stream
+        try:
+            await self._stream
+        except BaseException as ex:
+            logger.error(
+                "Streamed upload of %s failed after %.1fs: %s",
+                self._path,
+                time.monotonic() - self._stream_started_at,
+                ex,
+            )
+            raise
+        elapsed = max(time.monotonic() - self._stream_started_at, 1e-6)
+        logger.info(
+            "Streamed upload of %s finished: %s in %.1fs (%.1f MiB/s)",
+            self._path,
+            _mib(self._size),
+            elapsed,
+            self._size / (1024 * 1024) / elapsed,
+        )
 
     async def _growing(self) -> AsyncIterator[bytes]:
         """The spool as a stream that grows while the client keeps writing."""

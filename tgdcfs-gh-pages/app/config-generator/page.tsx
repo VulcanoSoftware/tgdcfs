@@ -587,6 +587,10 @@ export default function ConfigGenerator() {
             host_key_file: string;
             authorized_keys_dir?: string;
             upload_buffer_size_mb: number;
+            write_behind?: boolean;
+            write_behind_max_mb?: number;
+            stream_segment_mb?: number;
+            stream_window_mb?: number;
           } = {
             enabled: true,
             host: sftp.host,
@@ -594,6 +598,19 @@ export default function ConfigGenerator() {
             host_key_file: sftp.host_key_file,
             upload_buffer_size_mb: sftp.upload_buffer_size_mb,
           };
+          // Only what differs from the server's defaults is written out.
+          if (sftp.write_behind) {
+            block.write_behind = true;
+            if (sftp.write_behind_max_mb !== 2048) {
+              block.write_behind_max_mb = sftp.write_behind_max_mb;
+            }
+          }
+          if (sftp.stream_segment_mb !== 256) {
+            block.stream_segment_mb = sftp.stream_segment_mb;
+          }
+          if (!sftp.stream_window_auto) {
+            block.stream_window_mb = sftp.stream_window_mb;
+          }
           if (sftp.authorized_keys_dir.trim() !== "") {
             block.authorized_keys_dir = sftp.authorized_keys_dir.trim();
           }
@@ -1305,6 +1322,121 @@ export default function ConfigGenerator() {
                     per user in that directory, named after the username, in
                     the usual <code>authorized_keys</code> format. The user
                     still has to be listed above so the readonly flag applies.
+                  </Typography>
+                  <Typography variant="subtitle2" sx={{ mt: 2 }}>
+                    Uploads
+                  </Typography>
+                  <Typography
+                    variant="body2"
+                    color="text.secondary"
+                    sx={{ mb: 1 }}
+                  >
+                    Uploads are always sent on while the client is still
+                    sending, so a large file does not have to be received in
+                    full first. Data that has been sent on is removed from the
+                    buffer again.
+                  </Typography>
+                  <FormControlLabel
+                    label="Choose the upload window automatically (recommended)"
+                    control={
+                      <Checkbox
+                        checked={config.tgdcfs.sftp.stream_window_auto}
+                        onChange={(e) =>
+                          updateConfig("tgdcfs.sftp", {
+                            ...config.tgdcfs.sftp,
+                            stream_window_auto: e.target.checked,
+                          })
+                        }
+                      />
+                    }
+                  />
+                  {!config.tgdcfs.sftp.stream_window_auto && (
+                    <ConfigTextField
+                      label="Upload Window (MB)"
+                      type="number"
+                      value={config.tgdcfs.sftp.stream_window_mb}
+                      onChange={(e) =>
+                        updateConfig("tgdcfs.sftp", {
+                          ...config.tgdcfs.sftp,
+                          stream_window_mb: Math.max(
+                            1,
+                            parseInt(e.target.value) || 1
+                          ),
+                        })
+                      }
+                      width={180}
+                    />
+                  )}
+                  <Typography
+                    variant="body2"
+                    color="text.secondary"
+                    sx={{ mb: 1 }}
+                  >
+                    The window is how far a client may run ahead of the upload
+                    before its writes wait. That is what keeps a fast client
+                    from filling the disk the buffer lives on. Automatic uses
+                    an eighth of that disk&apos;s free space, between 16 and
+                    512 MB. Set it by hand only if you know better.
+                  </Typography>
+                  <ConfigTextField
+                    label="Segment Size (MB)"
+                    type="number"
+                    value={config.tgdcfs.sftp.stream_segment_mb}
+                    onChange={(e) =>
+                      updateConfig("tgdcfs.sftp", {
+                        ...config.tgdcfs.sftp,
+                        stream_segment_mb: Math.min(
+                          1900,
+                          Math.max(1, parseInt(e.target.value) || 1)
+                        ),
+                      })
+                    }
+                    width={180}
+                  />
+                  <Typography
+                    variant="body2"
+                    color="text.secondary"
+                    sx={{ mb: 1 }}
+                  >
+                    Only used for stores that need a part&apos;s size before it
+                    is sent (Discord): a file is cut into segments of this
+                    size, 1 to 1900 MB. Telegram takes the stream as it is.
+                  </Typography>
+                  <FormControlLabel
+                    label="Answer an upload as soon as it is buffered (write-behind)"
+                    control={
+                      <Checkbox
+                        checked={config.tgdcfs.sftp.write_behind}
+                        onChange={(e) =>
+                          updateConfig("tgdcfs.sftp", {
+                            ...config.tgdcfs.sftp,
+                            write_behind: e.target.checked,
+                          })
+                        }
+                      />
+                    }
+                  />
+                  {config.tgdcfs.sftp.write_behind && (
+                    <ConfigTextField
+                      label="Write-behind Limit (MB, 0 = no limit)"
+                      type="number"
+                      value={config.tgdcfs.sftp.write_behind_max_mb}
+                      onChange={(e) =>
+                        updateConfig("tgdcfs.sftp", {
+                          ...config.tgdcfs.sftp,
+                          write_behind_max_mb: Math.max(
+                            0,
+                            parseInt(e.target.value) || 0
+                          ),
+                        })
+                      }
+                      width={260}
+                    />
+                  )}
+                  <Typography variant="body2" color="text.secondary">
+                    Helps small files: the client hears &quot;done&quot; before
+                    the stores have the file, and a crash or restart before the
+                    background upload finishes loses it. Off by default.
                   </Typography>
                 </>
               )}
